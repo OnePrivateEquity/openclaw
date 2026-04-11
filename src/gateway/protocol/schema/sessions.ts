@@ -106,6 +106,29 @@ export const SessionsSendParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const SessionMessageParamsSchema = Type.Object(
+  {
+    key: Type.Optional(NonEmptyString),
+    sessionKey: Type.Optional(NonEmptyString),
+    sessionId: Type.Optional(NonEmptyString),
+    label: Type.Optional(SessionLabelString),
+    agentId: Type.Optional(NonEmptyString),
+    includeGlobal: Type.Optional(Type.Boolean()),
+    includeUnknown: Type.Optional(Type.Boolean()),
+    spawnedBy: Type.Optional(NonEmptyString),
+    message: Type.String(),
+    thinking: Type.Optional(Type.String()),
+    attachments: Type.Optional(Type.Array(Type.Unknown())),
+    timeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
+    idempotencyKey: Type.Optional(NonEmptyString),
+    requestId: Type.Optional(NonEmptyString),
+    correlationId: Type.Optional(NonEmptyString),
+    expectFinal: Type.Optional(Type.Boolean()),
+    metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  },
+  { additionalProperties: false },
+);
+
 export const SessionsMessagesSubscribeParamsSchema = Type.Object(
   {
     key: NonEmptyString,

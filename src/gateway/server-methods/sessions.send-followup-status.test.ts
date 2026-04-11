@@ -8,6 +8,7 @@ const loadGatewaySessionRowMock = vi.fn();
 const getLatestSubagentRunByChildSessionKeyMock = vi.fn();
 const replaceSubagentRunAfterSteerMock = vi.fn();
 const chatSendMock = vi.fn();
+const resolveSessionKeyFromResolveParamsMock = vi.fn();
 
 vi.mock("../session-utils.js", async () => {
   const actual = await vi.importActual<typeof import("../session-utils.js")>("../session-utils.js");
@@ -40,6 +41,11 @@ vi.mock("./chat.js", () => ({
   },
 }));
 
+vi.mock("../sessions-resolve.js", () => ({
+  resolveSessionKeyFromResolveParams: (...args: unknown[]) =>
+    resolveSessionKeyFromResolveParamsMock(...args),
+}));
+
 import { sessionsHandlers } from "./sessions.js";
 
 describe("sessions.send completed subagent follow-up status", () => {
@@ -50,6 +56,7 @@ describe("sessions.send completed subagent follow-up status", () => {
     getLatestSubagentRunByChildSessionKeyMock.mockReset();
     replaceSubagentRunAfterSteerMock.mockReset();
     chatSendMock.mockReset();
+    resolveSessionKeyFromResolveParamsMock.mockReset();
   });
 
   it("reactivates completed subagent sessions before broadcasting sessions.changed", async () => {
@@ -123,5 +130,58 @@ describe("sessions.send completed subagent follow-up status", () => {
       completedRun,
       childSessionKey,
     });
+  });
+
+  it("accepts session.message and resolves sessionKey aliases before delegating to chat.send", async () => {
+    resolveSessionKeyFromResolveParamsMock.mockResolvedValue({
+      ok: true,
+      key: "agent:soc:discord:direct:123",
+    });
+    loadSessionEntryMock.mockReturnValue({
+      canonicalKey: "agent:soc:discord:direct:123",
+      storePath: "/tmp/sessions.json",
+      entry: { sessionId: "sess-123" },
+    });
+    readSessionMessagesMock.mockReturnValue([]);
+    chatSendMock.mockImplementation(async ({ respond }: { respond: RespondFn }) => {
+      respond(true, { runId: "run-1", status: "started" }, undefined, undefined);
+    });
+
+    const respond = vi.fn() as unknown as RespondFn;
+    const context = {
+      chatAbortControllers: new Map(),
+      broadcastToConnIds: vi.fn(),
+      getSessionEventSubscriberConnIds: () => new Set<string>(),
+    } as unknown as GatewayRequestContext;
+
+    await sessionsHandlers["session.message"]({
+      req: { id: "req-2" } as never,
+      params: {
+        sessionKey: "agent:soc:discord:direct:123",
+        message: "hello",
+      },
+      respond,
+      context,
+      client: null,
+      isWebchatConnect: () => false,
+    });
+
+    expect(resolveSessionKeyFromResolveParamsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        p: expect.objectContaining({ key: "agent:soc:discord:direct:123" }),
+      }),
+    );
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        ok: true,
+        accepted: true,
+        sessionKey: "agent:soc:discord:direct:123",
+        deliveryState: "accepted",
+        runId: "run-1",
+      }),
+      undefined,
+      undefined,
+    );
   });
 });

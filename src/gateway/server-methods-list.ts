@@ -80,6 +80,7 @@ const BASE_METHODS = [
   "sessions.compaction.restore",
   "sessions.create",
   "sessions.send",
+  "session.message",
   "sessions.abort",
   "sessions.patch",
   "sessions.reset",

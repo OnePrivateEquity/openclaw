@@ -217,6 +217,8 @@ import {
   SessionsCompactionRestoreParamsSchema,
   type SessionsCreateParams,
   SessionsCreateParamsSchema,
+  type SessionMessageParams,
+  SessionMessageParamsSchema,
   type SessionsDeleteParams,
   SessionsDeleteParamsSchema,
   type SessionsListParams,
@@ -377,6 +379,9 @@ export const validateSessionsCreateParams = ajv.compile<SessionsCreateParams>(
   SessionsCreateParamsSchema,
 );
 export const validateSessionsSendParams = ajv.compile<SessionsSendParams>(SessionsSendParamsSchema);
+export const validateSessionMessageParams = ajv.compile<SessionMessageParams>(
+  SessionMessageParamsSchema,
+);
 export const validateSessionsMessagesSubscribeParams = ajv.compile<SessionsMessagesSubscribeParams>(
   SessionsMessagesSubscribeParamsSchema,
 );

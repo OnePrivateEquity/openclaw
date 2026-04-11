@@ -53,6 +53,7 @@ export type SessionsCompactionBranchResult = SchemaType<"SessionsCompactionBranc
 export type SessionsCompactionRestoreResult = SchemaType<"SessionsCompactionRestoreResult">;
 export type SessionsCreateParams = SchemaType<"SessionsCreateParams">;
 export type SessionsSendParams = SchemaType<"SessionsSendParams">;
+export type SessionMessageParams = SchemaType<"SessionMessageParams">;
 export type SessionsMessagesSubscribeParams = SchemaType<"SessionsMessagesSubscribeParams">;
 export type SessionsMessagesUnsubscribeParams = SchemaType<"SessionsMessagesUnsubscribeParams">;
 export type SessionsAbortParams = SchemaType<"SessionsAbortParams">;

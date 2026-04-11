@@ -48,6 +48,7 @@ import {
   validateSessionsCompactionGetParams,
   validateSessionsCompactionListParams,
   validateSessionsCompactionRestoreParams,
+  validateSessionMessageParams,
   validateSessionsCreateParams,
   validateSessionsDeleteParams,
   validateSessionsListParams,
@@ -551,6 +552,106 @@ async function handleSessionSend(params: {
     });
   }
 }
+
+async function handleSessionMessage(params: {
+  req: GatewayRequestHandlerOptions["req"];
+  params: Record<string, unknown>;
+  respond: RespondFn;
+  context: GatewayRequestContext;
+  client: GatewayClient | null;
+  isWebchatConnect: GatewayRequestHandlerOptions["isWebchatConnect"];
+}) {
+  if (
+    !assertValidParams(
+      params.params,
+      validateSessionMessageParams,
+      "session.message",
+      params.respond,
+    )
+  ) {
+    return;
+  }
+  const p = params.params as {
+    key?: string;
+    sessionKey?: string;
+    sessionId?: string;
+    label?: string;
+    agentId?: string;
+    includeGlobal?: boolean;
+    includeUnknown?: boolean;
+    spawnedBy?: string;
+    message: string;
+    thinking?: string;
+    attachments?: unknown[];
+    timeoutMs?: number;
+    idempotencyKey?: string;
+  };
+  const cfg = loadConfig();
+  const resolved = await resolveSessionKeyFromResolveParams({
+    cfg,
+    p: {
+      key: p.sessionKey ?? p.key,
+      sessionId: p.sessionId,
+      label: p.label,
+      agentId: p.agentId,
+      includeGlobal: p.includeGlobal,
+      includeUnknown: p.includeUnknown,
+      spawnedBy: p.spawnedBy,
+    },
+  });
+  if (!resolved.ok) {
+    params.respond(false, undefined, resolved.error);
+    return;
+  }
+
+  let responseSent = false;
+  await handleSessionSend({
+    method: "sessions.send",
+    req: params.req,
+    params: {
+      key: resolved.key,
+      message: p.message,
+      thinking: p.thinking,
+      attachments: p.attachments,
+      timeoutMs: p.timeoutMs,
+      idempotencyKey: p.idempotencyKey,
+    },
+    respond: (ok, payload, error, meta) => {
+      responseSent = true;
+      if (!ok) {
+        params.respond(false, undefined, error, meta);
+        return;
+      }
+      const typedPayload =
+        payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+      params.respond(
+        true,
+        {
+          ok: true,
+          accepted: true,
+          sessionKey: resolved.key,
+          deliveryState: "accepted",
+          ...typedPayload,
+        },
+        undefined,
+        meta,
+      );
+    },
+    context: params.context,
+    client: params.client,
+    isWebchatConnect: params.isWebchatConnect,
+    interruptIfActive: false,
+  });
+
+  if (!responseSent) {
+    params.respond(
+      false,
+      undefined,
+      errorShape(ErrorCodes.UNAVAILABLE, `failed to deliver message to session: ${resolved.key}`),
+    );
+  }
+}
+
 export const sessionsHandlers: GatewayRequestHandlers = {
   "sessions.list": ({ params, respond }) => {
     if (!assertValidParams(params, validateSessionsListParams, "sessions.list", respond)) {
@@ -1181,6 +1282,16 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       client,
       isWebchatConnect,
       interruptIfActive: false,
+    });
+  },
+  "session.message": async ({ req, params, respond, context, client, isWebchatConnect }) => {
+    await handleSessionMessage({
+      req,
+      params,
+      respond,
+      context,
+      client,
+      isWebchatConnect,
     });
   },
   "sessions.steer": async ({ req, params, respond, context, client, isWebchatConnect }) => {

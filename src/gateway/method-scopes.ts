@@ -133,6 +133,7 @@ const METHOD_SCOPE_GROUPS: Record<OperatorScope, readonly string[]> = {
     "chat.abort",
     "sessions.create",
     "sessions.send",
+    "session.message",
     "sessions.steer",
     "sessions.abort",
     "sessions.compaction.branch",
