@@ -10,6 +10,7 @@ import { parseAgentSessionKey } from "../routing/session-key.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import { isDeliverableMessageChannel } from "../utils/message-channel.js";
+import { appendDeliveryLedgerEntry, resolveBasicDeliveryTurnTiming } from "./delivery-ledger.js";
 import {
   formatTaskBlockedFollowupMessage,
   formatTaskStateChangeMessage,
@@ -185,6 +186,13 @@ function cloneTaskDeliveryState(state: TaskDeliveryState): TaskDeliveryState {
   return {
     ...state,
     ...(state.requesterOrigin ? { requesterOrigin: { ...state.requesterOrigin } } : {}),
+    ...(state.ledger
+      ? {
+          ledger: {
+            entries: state.ledger.entries.map((entry) => ({ ...entry })),
+          },
+        }
+      : {}),
   };
 }
 
@@ -951,8 +959,20 @@ function upsertTaskDeliveryState(state: TaskDeliveryState): TaskDeliveryState {
     ...(state.lastNotifiedEventAt != null
       ? { lastNotifiedEventAt: state.lastNotifiedEventAt }
       : {}),
+    ...(state.ledger
+      ? {
+          ledger: {
+            entries: state.ledger.entries.map((entry) => ({ ...entry })),
+          },
+        }
+      : {}),
   };
-  if (!next.requesterOrigin && typeof next.lastNotifiedEventAt !== "number" && !current) {
+  if (
+    !next.requesterOrigin &&
+    typeof next.lastNotifiedEventAt !== "number" &&
+    !next.ledger &&
+    !current
+  ) {
     return cloneTaskDeliveryState({ taskId: state.taskId });
   }
   taskDeliveryStates.set(state.taskId, next);
@@ -1168,6 +1188,14 @@ export async function maybeDeliverTaskStateChangeUpdate(
         taskId,
         requesterOrigin: refreshedState?.requesterOrigin,
         lastNotifiedEventAt: latestEvent.at,
+        ledger: appendDeliveryLedgerEntry(refreshedState?.ledger, {
+          kind: "task_state_change",
+          channel: "system_queue",
+          recordedAt: Date.now(),
+          eventAt: latestEvent.at,
+          eventKind: latestEvent.kind,
+          turnTiming: resolveBasicDeliveryTurnTiming(refreshedState?.ledger),
+        }),
       });
       return updateTask(taskId, {
         lastEventAt: Date.now(),
@@ -1198,6 +1226,15 @@ export async function maybeDeliverTaskStateChangeUpdate(
       taskId,
       requesterOrigin: refreshedState?.requesterOrigin,
       lastNotifiedEventAt: latestEvent.at,
+      ledger: appendDeliveryLedgerEntry(refreshedState?.ledger, {
+        kind: "task_state_change",
+        channel: "direct_message",
+        recordedAt: Date.now(),
+        eventAt: latestEvent.at,
+        eventKind: latestEvent.kind,
+        turnTiming: resolveBasicDeliveryTurnTiming(refreshedState?.ledger),
+        idempotencyKey,
+      }),
     });
     return updateTask(taskId, {
       lastEventAt: Date.now(),

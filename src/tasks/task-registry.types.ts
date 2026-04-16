@@ -1,4 +1,5 @@
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
+import type { DeliveryLedger } from "./delivery-ledger.js";
 
 export type TaskRuntime = "subagent" | "acp" | "cli" | "cron";
 
@@ -48,6 +49,7 @@ export type TaskDeliveryState = {
   taskId: string;
   requesterOrigin?: DeliveryContext;
   lastNotifiedEventAt?: number;
+  ledger?: DeliveryLedger;
 };
 
 export type TaskRecord = {

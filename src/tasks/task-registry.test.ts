@@ -23,6 +23,7 @@ import {
   findLatestTaskForRelatedSessionKey,
   findTaskByRunId,
   getTaskById,
+  getTaskRegistrySnapshot,
   getTaskRegistrySummary,
   isParentFlowLinkError,
   listTasksForOwnerKey,
@@ -1672,6 +1673,51 @@ describe("task-registry", () => {
         status: "running",
       });
       expect(hoisted.sendMessageMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("records a basic delivery ledger entry for task state-change updates", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+      resetSystemEventsForTest();
+
+      const task = createTaskRecord({
+        runtime: "acp",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:codex:acp:child",
+        runId: "run-state-change-ledger",
+        task: "Investigate issue",
+        status: "running",
+        notifyPolicy: "state_changes",
+      });
+
+      await maybeDeliverTaskStateChangeUpdate(task.taskId, {
+        at: 2_468,
+        kind: "progress",
+        summary: "Still working.",
+      });
+
+      expect(getTaskRegistrySnapshot().deliveryStates).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            taskId: task.taskId,
+            lastNotifiedEventAt: 2_468,
+            ledger: {
+              entries: [
+                expect.objectContaining({
+                  kind: "task_state_change",
+                  channel: "system_queue",
+                  eventAt: 2_468,
+                  eventKind: "progress",
+                  turnTiming: "same_turn",
+                }),
+              ],
+            },
+          }),
+        ]),
+      );
     });
   });
 

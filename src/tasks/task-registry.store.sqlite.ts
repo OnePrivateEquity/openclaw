@@ -39,6 +39,7 @@ type TaskDeliveryStateRow = {
   task_id: string;
   requester_origin_json: string | null;
   last_notified_event_at: number | bigint | null;
+  ledger_json: string | null;
 };
 
 type TableInfoRow = {
@@ -129,10 +130,12 @@ function rowToTaskRecord(row: TaskRegistryRow): TaskRecord {
 function rowToTaskDeliveryState(row: TaskDeliveryStateRow): TaskDeliveryState {
   const requesterOrigin = parseJsonValue<DeliveryContext>(row.requester_origin_json);
   const lastNotifiedEventAt = normalizeNumber(row.last_notified_event_at);
+  const ledger = parseJsonValue<TaskDeliveryState["ledger"]>(row.ledger_json);
   return {
     taskId: row.task_id,
     ...(requesterOrigin ? { requesterOrigin } : {}),
     ...(lastNotifiedEventAt != null ? { lastNotifiedEventAt } : {}),
+    ...(ledger ? { ledger } : {}),
   };
 }
 
@@ -172,6 +175,7 @@ function bindTaskDeliveryState(state: TaskDeliveryState) {
     task_id: state.taskId,
     requester_origin_json: serializeJson(state.requesterOrigin),
     last_notified_event_at: state.lastNotifiedEventAt ?? null,
+    ledger_json: serializeJson(state.ledger),
   };
 }
 
@@ -212,7 +216,8 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
       SELECT
         task_id,
         requester_origin_json,
-        last_notified_event_at
+        last_notified_event_at,
+        ledger_json
       FROM task_delivery_state
       ORDER BY task_id ASC
     `),
@@ -303,11 +308,13 @@ function createStatements(db: DatabaseSync): TaskRegistryStatements {
       INSERT OR REPLACE INTO task_delivery_state (
         task_id,
         requester_origin_json,
-        last_notified_event_at
+        last_notified_event_at,
+        ledger_json
       ) VALUES (
         @task_id,
         @requester_origin_json,
-        @last_notified_event_at
+        @last_notified_event_at,
+        @ledger_json
       )
     `),
     deleteRow: db.prepare(`DELETE FROM task_runs WHERE task_id = ?`),
@@ -406,9 +413,16 @@ function ensureSchema(db: DatabaseSync) {
     CREATE TABLE IF NOT EXISTS task_delivery_state (
       task_id TEXT PRIMARY KEY,
       requester_origin_json TEXT,
-      last_notified_event_at INTEGER
+      last_notified_event_at INTEGER,
+      ledger_json TEXT
     );
   `);
+  const deliveryStateColumns = db
+    .prepare(`PRAGMA table_info(task_delivery_state)`)
+    .all() as TableInfoRow[];
+  if (!deliveryStateColumns.some((row) => row.name === "ledger_json")) {
+    db.exec(`ALTER TABLE task_delivery_state ADD COLUMN ledger_json TEXT;`);
+  }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_run_id ON task_runs(run_id);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_runtime_status ON task_runs(runtime, status);`);
