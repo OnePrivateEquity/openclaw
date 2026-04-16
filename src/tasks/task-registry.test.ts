@@ -1636,6 +1636,45 @@ describe("task-registry", () => {
     });
   });
 
+  it("suppresses concurrent duplicate queued state-change delivery for the same event", async () => {
+    await withTaskRegistryTempDir(async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+      resetSystemEventsForTest();
+
+      const task = createTaskRecord({
+        runtime: "acp",
+        ownerKey: "agent:main:main",
+        scopeKind: "session",
+        childSessionKey: "agent:codex:acp:child",
+        runId: "run-state-change-race",
+        task: "Investigate issue",
+        status: "running",
+        notifyPolicy: "state_changes",
+      });
+
+      const event = {
+        at: 1_234,
+        kind: "progress" as const,
+        summary: "No output for 60s. It may be waiting for input.",
+      };
+
+      await Promise.all([
+        maybeDeliverTaskStateChangeUpdate(task.taskId, event),
+        maybeDeliverTaskStateChangeUpdate(task.taskId, event),
+      ]);
+
+      expect(peekSystemEvents("agent:main:main")).toEqual([
+        "Background task update: ACP background task. No output for 60s. It may be waiting for input.",
+      ]);
+      expect(findTaskByRunId("run-state-change-race")).toMatchObject({
+        notifyPolicy: "state_changes",
+        status: "running",
+      });
+      expect(hoisted.sendMessageMock).not.toHaveBeenCalled();
+    });
+  });
+
   it("keeps background ACP progress off the foreground lane and only sends a terminal notify", async () => {
     await withTaskRegistryTempDir(async (root) => {
       process.env.OPENCLAW_STATE_DIR = root;

@@ -58,6 +58,7 @@ const taskIdsByOwnerKey = new Map<string, Set<string>>();
 const taskIdsByParentFlowId = new Map<string, Set<string>>();
 const taskIdsByRelatedSessionKey = new Map<string, Set<string>>();
 const tasksWithPendingDelivery = new Set<string>();
+const taskStateChangesWithPendingDelivery = new Set<string>();
 let listenerStarted = false;
 let listenerStop: (() => void) | null = null;
 let restoreAttempted = false;
@@ -1143,7 +1144,16 @@ export async function maybeDeliverTaskStateChangeUpdate(
   if (!eventText) {
     return cloneTaskRecord(current);
   }
+  const inFlightKey = `${taskId}:${latestEvent.kind}:${latestEvent.at}`;
+  if (taskStateChangesWithPendingDelivery.has(inFlightKey)) {
+    return cloneTaskRecord(current);
+  }
+  taskStateChangesWithPendingDelivery.add(inFlightKey);
   try {
+    const refreshedState = getTaskDeliveryState(taskId);
+    if ((refreshedState?.lastNotifiedEventAt ?? 0) >= latestEvent.at) {
+      return cloneTaskRecord(tasks.get(taskId) ?? current);
+    }
     const owner = resolveTaskDeliveryOwner(current);
     const ownerSessionKey = owner.sessionKey?.trim();
     if (!ownerSessionKey) {
@@ -1156,7 +1166,7 @@ export async function maybeDeliverTaskStateChangeUpdate(
       queueTaskSystemEvent(current, eventText);
       upsertTaskDeliveryState({
         taskId,
-        requesterOrigin: deliveryState?.requesterOrigin,
+        requesterOrigin: refreshedState?.requesterOrigin,
         lastNotifiedEventAt: latestEvent.at,
       });
       return updateTask(taskId, {
@@ -1186,7 +1196,7 @@ export async function maybeDeliverTaskStateChangeUpdate(
     });
     upsertTaskDeliveryState({
       taskId,
-      requesterOrigin: deliveryState?.requesterOrigin,
+      requesterOrigin: refreshedState?.requesterOrigin,
       lastNotifiedEventAt: latestEvent.at,
     });
     return updateTask(taskId, {
@@ -1199,6 +1209,8 @@ export async function maybeDeliverTaskStateChangeUpdate(
       error,
     });
     return cloneTaskRecord(current);
+  } finally {
+    taskStateChangesWithPendingDelivery.delete(inFlightKey);
   }
 }
 
@@ -1971,6 +1983,7 @@ export function resetTaskRegistryForTests(opts?: { persist?: boolean }) {
   taskIdsByParentFlowId.clear();
   taskIdsByRelatedSessionKey.clear();
   tasksWithPendingDelivery.clear();
+  taskStateChangesWithPendingDelivery.clear();
   restoreAttempted = false;
   resetTaskRegistryRuntimeForTests();
   if (listenerStop) {
