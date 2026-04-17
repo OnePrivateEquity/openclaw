@@ -17,6 +17,38 @@ import {
 type SessionEventSubscribers = Pick<SessionEventSubscriberRegistry, "getAll">;
 type SessionMessageSubscribers = Pick<SessionMessageSubscriberRegistry, "get">;
 
+type TranscriptDeliveryIdentity = {
+  turnId?: string;
+  idempotencyKey?: string;
+};
+
+function readOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function extractTranscriptDeliveryIdentity(message: unknown): TranscriptDeliveryIdentity {
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return {};
+  }
+  const record = message as {
+    turnId?: unknown;
+    idempotencyKey?: unknown;
+    __openclaw?: {
+      delivery?: {
+        turnId?: unknown;
+        idempotencyKey?: unknown;
+      };
+    };
+  };
+  return {
+    turnId:
+      readOptionalString(record.turnId) ?? readOptionalString(record.__openclaw?.delivery?.turnId),
+    idempotencyKey:
+      readOptionalString(record.idempotencyKey) ??
+      readOptionalString(record.__openclaw?.delivery?.idempotencyKey),
+  };
+}
+
 function buildGatewaySessionSnapshot(params: {
   sessionRow: GatewaySessionRow | null | undefined;
   includeSession?: boolean;
@@ -112,6 +144,7 @@ export function createTranscriptUpdateBroadcastHandler(params: {
       ...(typeof update.messageId === "string" ? { id: update.messageId } : {}),
       ...(typeof messageSeq === "number" ? { seq: messageSeq } : {}),
     });
+    const deliveryIdentity = extractTranscriptDeliveryIdentity(message);
     params.broadcastToConnIds(
       "session.message",
       {
@@ -119,6 +152,7 @@ export function createTranscriptUpdateBroadcastHandler(params: {
         message,
         ...(typeof update.messageId === "string" ? { messageId: update.messageId } : {}),
         ...(typeof messageSeq === "number" ? { messageSeq } : {}),
+        ...deliveryIdentity,
         ...sessionSnapshot,
       },
       connIds,
@@ -137,6 +171,7 @@ export function createTranscriptUpdateBroadcastHandler(params: {
         ts: Date.now(),
         ...(typeof update.messageId === "string" ? { messageId: update.messageId } : {}),
         ...(typeof messageSeq === "number" ? { messageSeq } : {}),
+        ...deliveryIdentity,
         ...sessionSnapshot,
       },
       sessionEventConnIds,

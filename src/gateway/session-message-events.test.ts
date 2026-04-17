@@ -433,6 +433,85 @@ describe("session.message websocket events", () => {
     }
   });
 
+  test("includes transcript delivery identity on session.message and sessions.changed events", async () => {
+    const storePath = await createSessionStoreFile();
+    const transcriptPath = path.join(path.dirname(storePath), "sess-main.jsonl");
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main",
+          sessionFile: transcriptPath,
+          updatedAt: Date.now(),
+        },
+      },
+      storePath,
+    });
+    const transcriptMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "delivery identity snapshot" }],
+      turnId: "turn-visible-1",
+      idempotencyKey: "idem-visible-1",
+      __openclaw: {
+        delivery: {
+          visible: true,
+          state: "sent",
+          turnId: "turn-visible-1",
+          idempotencyKey: "idem-visible-1",
+        },
+      },
+      timestamp: Date.now(),
+    };
+    await fs.writeFile(
+      transcriptPath,
+      [
+        JSON.stringify({ type: "session", version: 1, id: "sess-main" }),
+        JSON.stringify({ id: "msg-delivery", message: transcriptMessage }),
+      ].join("\n"),
+      "utf-8",
+    );
+
+    await withOperatorSessionSubscriber(harness, async (ws) => {
+      const messageEventPromise = waitForSessionMessageEvent(ws, "agent:main:main");
+      const changedEventPromise = onceMessage(
+        ws,
+        (message) =>
+          message.type === "event" &&
+          message.event === "sessions.changed" &&
+          (message.payload as { phase?: string; sessionKey?: string } | undefined)?.phase ===
+            "message" &&
+          (message.payload as { sessionKey?: string } | undefined)?.sessionKey ===
+            "agent:main:main",
+      );
+
+      emitSessionTranscriptUpdate({
+        sessionFile: transcriptPath,
+        sessionKey: "agent:main:main",
+        message: transcriptMessage,
+        messageId: "msg-delivery",
+      });
+
+      const [messageEvent, changedEvent] = await Promise.all([
+        messageEventPromise,
+        changedEventPromise,
+      ]);
+      expect(messageEvent.payload).toMatchObject({
+        sessionKey: "agent:main:main",
+        messageId: "msg-delivery",
+        messageSeq: 1,
+        turnId: "turn-visible-1",
+        idempotencyKey: "idem-visible-1",
+      });
+      expect(changedEvent.payload).toMatchObject({
+        sessionKey: "agent:main:main",
+        phase: "message",
+        messageId: "msg-delivery",
+        messageSeq: 1,
+        turnId: "turn-visible-1",
+        idempotencyKey: "idem-visible-1",
+      });
+    });
+  });
+
   test("includes route thread metadata on session.message and sessions.changed transcript events", async () => {
     const storePath = await createSessionStoreFile();
     const transcriptPath = path.join(path.dirname(storePath), "sess-thread.jsonl");

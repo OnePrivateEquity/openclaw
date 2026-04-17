@@ -408,6 +408,12 @@ implemented in `src/gateway/server-methods/*.ts`.
   events.
 - `session.message` and `session.tool`: transcript/event-stream updates for a
   subscribed session.
+  - For transcript-backed `session.message` events, the payload may include
+    top-level `turnId` and `idempotencyKey` when the appended transcript message
+    carried delivery identity.
+  - The same delivery identity is mirrored onto `sessions.changed` events with
+    `phase: "message"`, which gives operator clients a replay-safe audit seam
+    even when they are only watching the session index stream.
 - `sessions.changed`: session index or metadata changed.
 - `presence`: system presence snapshot updates.
 - `tick`: periodic keepalive / liveness event.
