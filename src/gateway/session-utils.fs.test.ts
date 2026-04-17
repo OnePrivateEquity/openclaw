@@ -501,6 +501,51 @@ describe("readSessionMessages", () => {
     expect(typeof marker.timestamp).toBe("number");
   });
 
+  test("surfaces assistant turn and delivery metadata from transcript entries", () => {
+    const sessionId = "turn-delivery-meta";
+    const transcriptPath = path.join(tmpDir, `${sessionId}.jsonl`);
+    fs.writeFileSync(
+      transcriptPath,
+      [
+        JSON.stringify({ type: "session", version: 1, id: sessionId }),
+        JSON.stringify({
+          id: "msg-1",
+          message: {
+            role: "assistant",
+            content: "World",
+            turnId: "turn-1",
+            __openclaw: {
+              delivery: {
+                visible: true,
+                state: "sent",
+                turnId: "turn-1",
+                idempotencyKey: "idem-1",
+              },
+            },
+          },
+        }),
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const out = readSessionMessages(sessionId, storePath);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      role: "assistant",
+      turnId: "turn-1",
+      __openclaw: {
+        id: "msg-1",
+        seq: 1,
+        delivery: {
+          visible: true,
+          state: "sent",
+          turnId: "turn-1",
+          idempotencyKey: "idem-1",
+        },
+      },
+    });
+  });
+
   test.each([
     {
       sessionId: "cross-agent-default-root",

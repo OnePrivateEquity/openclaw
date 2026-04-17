@@ -22,7 +22,9 @@ async function ensureSessionHeader(params: {
   if (fs.existsSync(params.sessionFile)) {
     return;
   }
-  await fs.promises.mkdir(path.dirname(params.sessionFile), { recursive: true });
+  await fs.promises.mkdir(path.dirname(params.sessionFile), {
+    recursive: true,
+  });
   const header = {
     type: "session",
     version: CURRENT_SESSION_VERSION,
@@ -37,7 +39,7 @@ async function ensureSessionHeader(params: {
 }
 
 export type SessionTranscriptAppendResult =
-  | { ok: true; sessionFile: string; messageId: string }
+  | { ok: true; sessionFile: string; messageId: string; appended?: boolean }
   | { ok: false; reason: string };
 
 export type SessionTranscriptUpdateMode = "inline" | "file-only" | "none";
@@ -97,6 +99,7 @@ export async function appendAssistantMessageToSessionTranscript(params: {
   text?: string;
   mediaUrls?: string[];
   idempotencyKey?: string;
+  turnId?: string;
   /** Optional override for store path (mostly for tests). */
   storePath?: string;
   updateMode?: SessionTranscriptUpdateMode;
@@ -119,6 +122,7 @@ export async function appendAssistantMessageToSessionTranscript(params: {
     sessionKey,
     storePath: params.storePath,
     idempotencyKey: params.idempotencyKey,
+    turnId: params.turnId,
     updateMode: params.updateMode,
     message: {
       role: "assistant" as const,
@@ -151,6 +155,7 @@ export async function appendExactAssistantMessageToSessionTranscript(params: {
   sessionKey: string;
   message: SessionTranscriptAssistantMessage;
   idempotencyKey?: string;
+  turnId?: string;
   storePath?: string;
   updateMode?: SessionTranscriptUpdateMode;
 }): Promise<SessionTranscriptAppendResult> {
@@ -194,23 +199,56 @@ export async function appendExactAssistantMessageToSessionTranscript(params: {
   const explicitIdempotencyKey =
     params.idempotencyKey ??
     ((params.message as { idempotencyKey?: unknown }).idempotencyKey as string | undefined);
-  const existingMessageId = explicitIdempotencyKey
-    ? await transcriptHasIdempotencyKey(sessionFile, explicitIdempotencyKey)
-    : undefined;
+  const explicitTurnId =
+    params.turnId ??
+    ((params.message as { turnId?: unknown }).turnId as string | undefined) ??
+    explicitIdempotencyKey;
+  const existingMessageId = await transcriptFindAssistantMessageId(sessionFile, {
+    turnId: explicitTurnId,
+    idempotencyKey: explicitIdempotencyKey,
+  });
   if (existingMessageId) {
-    return { ok: true, sessionFile, messageId: existingMessageId };
+    return {
+      ok: true,
+      sessionFile,
+      messageId: existingMessageId,
+      appended: false,
+    };
   }
 
+  const deliveryMeta = {
+    visible: true,
+    state: "sent",
+    ...(explicitTurnId ? { turnId: explicitTurnId } : {}),
+    ...(explicitIdempotencyKey ? { idempotencyKey: explicitIdempotencyKey } : {}),
+  };
   const message = {
     ...params.message,
     ...(explicitIdempotencyKey ? { idempotencyKey: explicitIdempotencyKey } : {}),
+    ...(explicitTurnId ? { turnId: explicitTurnId } : {}),
+    __openclaw: {
+      ...(params.message as { __openclaw?: Record<string, unknown> }).__openclaw,
+      delivery: {
+        ...(
+          params.message as {
+            __openclaw?: { delivery?: Record<string, unknown> };
+          }
+        ).__openclaw?.delivery,
+        ...deliveryMeta,
+      },
+    },
   } as Parameters<SessionManager["appendMessage"]>[0];
   const sessionManager = SessionManager.open(sessionFile);
   const messageId = sessionManager.appendMessage(message);
 
   switch (params.updateMode ?? "inline") {
     case "inline":
-      emitSessionTranscriptUpdate({ sessionFile, sessionKey, message, messageId });
+      emitSessionTranscriptUpdate({
+        sessionFile,
+        sessionKey,
+        message,
+        messageId,
+      });
       break;
     case "file-only":
       emitSessionTranscriptUpdate(sessionFile);
@@ -218,15 +256,22 @@ export async function appendExactAssistantMessageToSessionTranscript(params: {
     case "none":
       break;
   }
-  return { ok: true, sessionFile, messageId };
+  return { ok: true, sessionFile, messageId, appended: true };
 }
 
-async function transcriptHasIdempotencyKey(
-  transcriptPath: string,
-  idempotencyKey: string,
-): Promise<string | undefined> {
+export async function readAssistantTurnDeliveryFromSessionTranscript(params: {
+  transcriptPath: string;
+  turnId?: string;
+  idempotencyKey?: string;
+}): Promise<{ messageId?: string; turnId?: string; idempotencyKey?: string } | undefined> {
+  const turnId = params.turnId?.trim();
+  const idempotencyKey = params.idempotencyKey?.trim();
+  if (!turnId && !idempotencyKey) {
+    return undefined;
+  }
+
   try {
-    const raw = await fs.promises.readFile(transcriptPath, "utf-8");
+    const raw = await fs.promises.readFile(params.transcriptPath, "utf-8");
     for (const line of raw.split(/\r?\n/)) {
       if (!line.trim()) {
         continue;
@@ -234,14 +279,40 @@ async function transcriptHasIdempotencyKey(
       try {
         const parsed = JSON.parse(line) as {
           id?: unknown;
-          message?: { idempotencyKey?: unknown };
+          message?: {
+            role?: unknown;
+            turnId?: unknown;
+            idempotencyKey?: unknown;
+            __openclaw?: {
+              delivery?: { turnId?: unknown; idempotencyKey?: unknown };
+            };
+          };
         };
+        const message = parsed.message;
+        if (message?.role !== "assistant") {
+          continue;
+        }
+        const messageTurnId =
+          typeof message.turnId === "string"
+            ? message.turnId
+            : typeof message.__openclaw?.delivery?.turnId === "string"
+              ? message.__openclaw.delivery.turnId
+              : undefined;
+        const messageIdempotencyKey =
+          typeof message.idempotencyKey === "string"
+            ? message.idempotencyKey
+            : typeof message.__openclaw?.delivery?.idempotencyKey === "string"
+              ? message.__openclaw.delivery.idempotencyKey
+              : undefined;
         if (
-          parsed.message?.idempotencyKey === idempotencyKey &&
-          typeof parsed.id === "string" &&
-          parsed.id
+          (turnId && messageTurnId === turnId) ||
+          (idempotencyKey && messageIdempotencyKey === idempotencyKey)
         ) {
-          return parsed.id;
+          return {
+            ...(typeof parsed.id === "string" && parsed.id ? { messageId: parsed.id } : {}),
+            ...(messageTurnId ? { turnId: messageTurnId } : {}),
+            ...(messageIdempotencyKey ? { idempotencyKey: messageIdempotencyKey } : {}),
+          };
         }
       } catch {
         continue;
@@ -251,4 +322,16 @@ async function transcriptHasIdempotencyKey(
     return undefined;
   }
   return undefined;
+}
+
+async function transcriptFindAssistantMessageId(
+  transcriptPath: string,
+  params: { turnId?: string; idempotencyKey?: string },
+): Promise<string | undefined> {
+  const match = await readAssistantTurnDeliveryFromSessionTranscript({
+    transcriptPath,
+    turnId: params.turnId,
+    idempotencyKey: params.idempotencyKey,
+  });
+  return match?.messageId;
 }

@@ -6,6 +6,7 @@ import { useTempSessionsFixture } from "./test-helpers.js";
 import {
   appendAssistantMessageToSessionTranscript,
   appendExactAssistantMessageToSessionTranscript,
+  readAssistantTurnDeliveryFromSessionTranscript,
 } from "./transcript.js";
 
 describe("appendAssistantMessageToSessionTranscript", () => {
@@ -118,6 +119,42 @@ describe("appendAssistantMessageToSessionTranscript", () => {
     expect(messageLine.message.content[0].text).toBe("Hello from delivery mirror!");
   });
 
+  it("does not append a duplicate visible assistant message for the same turnId", async () => {
+    writeTranscriptStore();
+
+    const first = await appendAssistantMessageToSessionTranscript({
+      sessionKey,
+      text: "Hello from delivery mirror!",
+      idempotencyKey: "mirror:test-source-message:1",
+      turnId: "turn:test-source-message",
+      storePath: fixture.storePath(),
+    });
+    const second = await appendAssistantMessageToSessionTranscript({
+      sessionKey,
+      text: "Hello again from delivery mirror!",
+      idempotencyKey: "mirror:test-source-message:2",
+      turnId: "turn:test-source-message",
+      storePath: fixture.storePath(),
+    });
+
+    expect(first).toMatchObject({ ok: true, appended: true });
+    expect(second).toMatchObject({ ok: true, appended: false });
+
+    const sessionFile = resolveSessionTranscriptPathInDir(sessionId, fixture.sessionsDir());
+    const lines = fs.readFileSync(sessionFile, "utf-8").trim().split("\n");
+    expect(lines.length).toBe(2);
+
+    const messageLine = JSON.parse(lines[1]);
+    expect(messageLine.message.turnId).toBe("turn:test-source-message");
+    expect(messageLine.message.idempotencyKey).toBe("mirror:test-source-message:1");
+    expect(messageLine.message.__openclaw.delivery).toMatchObject({
+      visible: true,
+      state: "sent",
+      turnId: "turn:test-source-message",
+      idempotencyKey: "mirror:test-source-message:1",
+    });
+  });
+
   it("finds session entry using normalized (lowercased) key", async () => {
     const storeKey = "agent:main:bluebubbles:direct:+15551234567";
     const store = {
@@ -195,6 +232,34 @@ describe("appendAssistantMessageToSessionTranscript", () => {
     expect(result.ok).toBe(true);
     const lines = fs.readFileSync(sessionFile, "utf-8").trim().split("\n");
     expect(lines.length).toBe(3);
+  });
+
+  it("reads assistant delivery metadata from transcript by turnId", async () => {
+    writeTranscriptStore();
+
+    const appended = await appendAssistantMessageToSessionTranscript({
+      sessionKey,
+      text: "Hello from delivery mirror!",
+      idempotencyKey: "mirror:test-source-message",
+      turnId: "turn:test-source-message",
+      storePath: fixture.storePath(),
+    });
+
+    expect(appended.ok).toBe(true);
+    if (!appended.ok) {
+      return;
+    }
+
+    const match = await readAssistantTurnDeliveryFromSessionTranscript({
+      transcriptPath: appended.sessionFile,
+      turnId: "turn:test-source-message",
+    });
+
+    expect(match).toEqual({
+      messageId: appended.messageId,
+      turnId: "turn:test-source-message",
+      idempotencyKey: "mirror:test-source-message",
+    });
   });
 
   it("appends exact assistant transcript messages without rewriting phased content", async () => {

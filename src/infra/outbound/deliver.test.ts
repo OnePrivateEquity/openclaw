@@ -43,6 +43,7 @@ const queueMocks = vi.hoisted(() => ({
 }));
 const logMocks = vi.hoisted(() => ({
   warn: vi.fn(),
+  info: vi.fn(),
 }));
 
 vi.mock("../../config/sessions/transcript.runtime.js", async () => {
@@ -79,7 +80,7 @@ vi.mock("../../logging/subsystem.js", () => ({
   createSubsystemLogger: () => {
     const makeLogger = () => ({
       warn: logMocks.warn,
-      info: vi.fn(),
+      info: logMocks.info,
       error: vi.fn(),
       debug: vi.fn(),
       child: vi.fn(() => makeLogger()),
@@ -212,6 +213,7 @@ describe("deliverOutboundPayloads", () => {
     queueMocks.failDelivery.mockClear();
     queueMocks.failDelivery.mockResolvedValue(undefined);
     logMocks.warn.mockClear();
+    logMocks.info.mockClear();
   });
 
   afterEach(() => {
@@ -918,6 +920,58 @@ describe("deliverOutboundPayloads", () => {
       expect.objectContaining({
         text: "report.pdf",
         idempotencyKey: "idem-deliver-1",
+        turnId: "idem-deliver-1",
+      }),
+    );
+  });
+
+  it("suppresses duplicate visible assistant delivery when transcript mirror gate says already appended", async () => {
+    const sendLine = vi.fn().mockResolvedValue({ channel: "line", messageId: "line-1" });
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "line",
+          source: "test",
+          plugin: createOutboundTestPlugin({
+            id: "line",
+            outbound: {
+              deliveryMode: "direct",
+              sendText: sendLine,
+            },
+          }),
+        },
+      ]),
+    );
+    mocks.appendAssistantMessageToSessionTranscript.mockResolvedValue({
+      ok: true,
+      sessionFile: "x",
+      messageId: "existing-msg",
+      appended: false,
+    });
+
+    const results = await deliverOutboundPayloads({
+      cfg: { channels: { line: {} } } as OpenClawConfig,
+      channel: "line",
+      to: "U123",
+      payloads: [{ text: "caption" }],
+      mirror: {
+        sessionKey: "agent:main:main",
+        text: "caption",
+        idempotencyKey: "idem-deliver-1",
+      },
+    });
+
+    expect(results).toEqual([]);
+    expect(sendLine).not.toHaveBeenCalled();
+    expect(queueMocks.ackDelivery).toHaveBeenCalled();
+    expect(logMocks.info).toHaveBeenCalledWith(
+      "deliverOutboundPayloads: skipping duplicate visible assistant delivery",
+      expect.objectContaining({
+        channel: "line",
+        to: "U123",
+        sessionKey: "agent:main:main",
+        turnId: "idem-deliver-1",
+        messageId: "existing-msg",
       }),
     );
   });

@@ -53,6 +53,10 @@ export type AgentCliOpts = {
   local?: boolean;
 };
 
+function resolveCanonicalTurnId(opts: Pick<AgentCliOpts, "runId">): string {
+  return normalizeOptionalString(opts.runId) || randomIdempotencyKey();
+}
+
 function parseTimeoutSeconds(opts: { cfg: OpenClawConfig; timeout?: string }) {
   const raw =
     opts.timeout !== undefined
@@ -118,7 +122,8 @@ export async function agentViaGatewayCommand(opts: AgentCliOpts, runtime: Runtim
   }).sessionKey;
 
   const channel = normalizeMessageChannel(opts.channel);
-  const idempotencyKey = normalizeOptionalString(opts.runId) || randomIdempotencyKey();
+  const turnId = resolveCanonicalTurnId(opts);
+  const idempotencyKey = turnId;
 
   const response: GatewayAgentResponse = await withProgress(
     {

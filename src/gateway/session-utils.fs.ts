@@ -113,10 +113,27 @@ export function readSessionMessages(
       const parsed = JSON.parse(line);
       if (parsed?.message) {
         messageSeq += 1;
+        const transcriptMessage = parsed.message as Record<string, unknown>;
+        const deliveryMeta =
+          transcriptMessage.__openclaw &&
+          typeof transcriptMessage.__openclaw === "object" &&
+          !Array.isArray(transcriptMessage.__openclaw) &&
+          (transcriptMessage.__openclaw as { delivery?: unknown }).delivery &&
+          typeof (transcriptMessage.__openclaw as { delivery?: unknown }).delivery === "object" &&
+          !Array.isArray((transcriptMessage.__openclaw as { delivery?: unknown }).delivery)
+            ? ((transcriptMessage.__openclaw as { delivery?: unknown }).delivery as Record<
+                string,
+                unknown
+              >)
+            : undefined;
         messages.push(
           attachOpenClawTranscriptMeta(parsed.message, {
             ...(typeof parsed.id === "string" ? { id: parsed.id } : {}),
             seq: messageSeq,
+            ...(typeof transcriptMessage.turnId === "string"
+              ? { turnId: transcriptMessage.turnId }
+              : {}),
+            ...(deliveryMeta ? { delivery: deliveryMeta } : {}),
           }),
         );
         continue;
@@ -230,7 +247,10 @@ export function readSessionTitleFieldsFromTranscript(
     // Tail (last message preview)
     let lastMessagePreview: string | null = null;
     try {
-      lastMessagePreview = readLastMessagePreviewFromOpenTranscript({ fd, size });
+      lastMessagePreview = readLastMessagePreviewFromOpenTranscript({
+        fd,
+        size,
+      });
     } catch {
       // ignore tail read errors
     }

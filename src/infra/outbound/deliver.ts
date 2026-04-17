@@ -372,7 +372,10 @@ function createMessageSentEmitter(params: {
   sessionKeyForInternalHooks?: string;
   mirrorIsGroup?: boolean;
   mirrorGroupId?: string;
-}): { emitMessageSent: (event: MessageSentEvent) => void; hasMessageSentHooks: boolean } {
+}): {
+  emitMessageSent: (event: MessageSentEvent) => void;
+  hasMessageSentHooks: boolean;
+} {
   const hasMessageSentHooks = params.hookRunner?.hasHooks("message_sent") ?? false;
   const canEmitInternalHook = Boolean(params.sessionKeyForInternalHooks);
   const emitMessageSent = (event: MessageSentEvent) => {
@@ -668,6 +671,46 @@ async function deliverOutboundPayloadsCore(
       },
     );
   }
+
+  if (params.mirror?.sessionKey) {
+    const turnId = params.mirror.idempotencyKey;
+    const mirrorText = resolveMirroredTranscriptText({
+      text: params.mirror.text,
+      mediaUrls: params.mirror.mediaUrls,
+    });
+    if (mirrorText && turnId) {
+      const transcriptRuntime = await loadTranscriptRuntime();
+      const transcriptAppend = await transcriptRuntime.appendAssistantMessageToSessionTranscript({
+        agentId: params.mirror.agentId,
+        sessionKey: params.mirror.sessionKey,
+        text: mirrorText,
+        idempotencyKey: params.mirror.idempotencyKey,
+        turnId,
+      });
+      if (!transcriptAppend.ok) {
+        log.warn(
+          "deliverOutboundPayloads: transcript turn-id gate unavailable, continuing delivery",
+          {
+            channel,
+            to,
+            sessionKey: params.mirror.sessionKey,
+            turnId,
+            reason: transcriptAppend.reason,
+          },
+        );
+      } else if (!transcriptAppend.appended) {
+        log.info("deliverOutboundPayloads: skipping duplicate visible assistant delivery", {
+          channel,
+          to,
+          sessionKey: params.mirror.sessionKey,
+          turnId,
+          messageId: transcriptAppend.messageId,
+        });
+        return results;
+      }
+    }
+  }
+
   for (const payload of normalizedPayloads) {
     let payloadSummary = buildPayloadSummary(payload);
     try {
@@ -792,21 +835,5 @@ async function deliverOutboundPayloadsCore(
       params.onError?.(err, payloadSummary);
     }
   }
-  if (params.mirror && results.length > 0) {
-    const mirrorText = resolveMirroredTranscriptText({
-      text: params.mirror.text,
-      mediaUrls: params.mirror.mediaUrls,
-    });
-    if (mirrorText) {
-      const { appendAssistantMessageToSessionTranscript } = await loadTranscriptRuntime();
-      await appendAssistantMessageToSessionTranscript({
-        agentId: params.mirror.agentId,
-        sessionKey: params.mirror.sessionKey,
-        text: mirrorText,
-        idempotencyKey: params.mirror.idempotencyKey,
-      });
-    }
-  }
-
   return results;
 }
