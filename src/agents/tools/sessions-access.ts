@@ -1,4 +1,5 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { isSubagentSessionKey, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -10,7 +11,12 @@ import {
   resolveMainSessionAlias,
 } from "./sessions-resolution.js";
 
-export type SessionToolsVisibility = "self" | "tree" | "agent" | "all";
+export type SessionToolsVisibility = "self" | "tree" | "agent" | "own" | "agentAllowlist" | "all";
+
+const log = createSubsystemLogger("sessions-access");
+const warnedPermissiveVisibility = new Set<string>();
+const PERMISSIVE_VISIBILITY_WARNING =
+  "[security] sessions.visibility=all is permissive; consider 'own' or 'agentAllowlist' for production";
 
 export type AgentToAgentPolicy = {
   enabled: boolean;
@@ -28,10 +34,29 @@ export function resolveSessionToolsVisibility(cfg: OpenClawConfig): SessionTools
   const raw = (cfg.tools as { sessions?: { visibility?: unknown } } | undefined)?.sessions
     ?.visibility;
   const value = normalizeLowercaseStringOrEmpty(raw);
-  if (value === "self" || value === "tree" || value === "agent" || value === "all") {
-    return value;
+  if (value === "all") {
+    if (!warnedPermissiveVisibility.has("all")) {
+      warnedPermissiveVisibility.add("all");
+      log.warn(PERMISSIVE_VISIBILITY_WARNING);
+    }
+    return "all";
   }
-  return "tree";
+  if (
+    value === "self" ||
+    value === "tree" ||
+    value === "agent" ||
+    value === "own" ||
+    value === "agentallowlist"
+  ) {
+    return value === "agentallowlist" ? "agentAllowlist" : value;
+  }
+  return "own";
+}
+
+export function resolveSessionToolsAgentAllowlist(cfg: OpenClawConfig): string[] {
+  const raw = (cfg.tools as { sessions?: { agentAllowlist?: unknown } } | undefined)?.sessions
+    ?.agentAllowlist;
+  return Array.isArray(raw) ? raw.filter((value): value is string => typeof value === "string") : [];
 }
 
 export function resolveEffectiveSessionToolsVisibility(params: {
@@ -194,6 +219,7 @@ export async function createSessionVisibilityGuard(params: {
   requesterSessionKey: string;
   visibility: SessionToolsVisibility;
   a2aPolicy: AgentToAgentPolicy;
+  agentAllowlist?: string[];
 }): Promise<{
   check: (targetSessionKey: string) => SessionAccessResult;
 }> {
@@ -202,17 +228,27 @@ export async function createSessionVisibilityGuard(params: {
     params.visibility === "tree"
       ? await listSpawnedSessionKeys({ requesterSessionKey: params.requesterSessionKey })
       : null;
+  const agentAllowlist = new Set(
+    params.visibility === "agentAllowlist"
+      ? (params.agentAllowlist ?? []).map((id) => normalizeLowercaseStringOrEmpty(id))
+      : [],
+  );
 
   const check = (targetSessionKey: string): SessionAccessResult => {
     const targetAgentId = resolveAgentIdFromSessionKey(targetSessionKey);
     const isCrossAgent = targetAgentId !== requesterAgentId;
     if (isCrossAgent) {
       if (params.visibility !== "all") {
-        return {
-          allowed: false,
-          status: "forbidden",
-          error: crossVisibilityMessage(params.action),
-        };
+        if (
+          params.visibility !== "agentAllowlist" ||
+          !agentAllowlist.has(normalizeLowercaseStringOrEmpty(targetAgentId))
+        ) {
+          return {
+            allowed: false,
+            status: "forbidden",
+            error: crossVisibilityMessage(params.action),
+          };
+        }
       }
       if (!params.a2aPolicy.enabled) {
         return {

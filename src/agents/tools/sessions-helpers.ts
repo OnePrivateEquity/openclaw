@@ -10,6 +10,7 @@ export {
   resolveEffectiveSessionToolsVisibility,
   resolveSandboxSessionToolsVisibility,
   resolveSandboxedSessionToolContext,
+  resolveSessionToolsAgentAllowlist,
   resolveSessionToolsVisibility,
 } from "./sessions-access.js";
 import { resolveSandboxedSessionToolContext } from "./sessions-access.js";

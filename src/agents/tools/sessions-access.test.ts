@@ -11,13 +11,13 @@ import {
 import { __testing as sessionsResolutionTesting } from "./sessions-resolution.js";
 
 describe("resolveSessionToolsVisibility", () => {
-  it("defaults to tree when unset or invalid", () => {
-    expect(resolveSessionToolsVisibility({} as unknown as OpenClawConfig)).toBe("tree");
+  it("defaults to own when unset or invalid", () => {
+    expect(resolveSessionToolsVisibility({} as unknown as OpenClawConfig)).toBe("own");
     expect(
       resolveSessionToolsVisibility({
         tools: { sessions: { visibility: "invalid" } },
       } as unknown as OpenClawConfig),
-    ).toBe("tree");
+    ).toBe("own");
   });
 
   it("accepts known visibility values case-insensitively", () => {
@@ -27,6 +27,14 @@ describe("resolveSessionToolsVisibility", () => {
       } as unknown as OpenClawConfig),
     ).toBe("all");
   });
+  it("accepts agentAllowlist visibility", () => {
+    expect(
+      resolveSessionToolsVisibility({
+        tools: { sessions: { visibility: "agentAllowlist" } },
+      } as unknown as OpenClawConfig),
+    ).toBe("agentAllowlist");
+  });
+
 });
 
 describe("resolveEffectiveSessionToolsVisibility", () => {
@@ -81,6 +89,23 @@ describe("sandbox session-tools context", () => {
 
     expect(context.restrictToSpawned).toBe(false);
     expect(context.requesterInternalKey).toBe("agent:main:subagent:abc");
+  });
+});
+
+describe("agentAllowlist visibility", () => {
+  it("allows named foreign agents while rejecting unnamed agents", async () => {
+    const guard = await createSessionVisibilityGuard({
+      action: "history",
+      requesterSessionKey: "agent:soc:main",
+      visibility: "agentAllowlist",
+      agentAllowlist: ["carmack"],
+      a2aPolicy: createAgentToAgentPolicy({
+        tools: { agentToAgent: { enabled: true, allow: ["soc", "carmack"] } },
+      } as unknown as OpenClawConfig),
+    });
+
+    expect(guard.check("agent:carmack:main").allowed).toBe(true);
+    expect(guard.check("agent:april:main").allowed).toBe(false);
   });
 });
 

@@ -1153,3 +1153,58 @@ describe("message tool sandbox passthrough", () => {
     expect(call?.senderIsOwner).toBe(false);
   });
 });
+
+describe("message tool identity enforcement", () => {
+  it("rejects cross-account sends unless the agent is allowlisted", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const blockedTool = createMessageTool({
+        agentAccountId: "soc",
+        agentSessionKey: "agent:soc:main",
+        config: {
+          agents: {
+            list: [{ id: "soc" }],
+          },
+        } as never,
+        runMessageAction: mocks.runMessageAction as never,
+      });
+
+      const blocked = (await blockedTool.execute("1", {
+        accountId: "carmack",
+        channel: "discord",
+        action: "send",
+        target: "foo",
+        message: "hi",
+      })) as { isError?: boolean; content?: Array<{ text?: string }> };
+
+      expect(blocked.content?.[0]?.text).toMatch(/identity_enforcement/i);
+      expect(mocks.runMessageAction).not.toHaveBeenCalled();
+
+      mockSendResult({ channel: "discord", to: "foo" });
+      const allowedTool = createMessageTool({
+        agentAccountId: "soc",
+        agentSessionKey: "agent:soc:main",
+        config: {
+          agents: {
+            list: [{ id: "soc", canImpersonateAccounts: ["carmack"] }],
+          },
+        } as never,
+        runMessageAction: mocks.runMessageAction as never,
+      });
+
+      const allowed = (await allowedTool.execute("2", {
+        accountId: "carmack",
+        channel: "discord",
+        action: "send",
+        target: "foo",
+        message: "hi",
+      })) as { isError?: boolean } | undefined;
+
+      expect(allowed?.isError).not.toBe(true);
+      expect(mocks.runMessageAction).toHaveBeenCalledTimes(1);
+      expect(mocks.runMessageAction.mock.calls[0]?.[0]?.params?.accountId).toBe("carmack");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});

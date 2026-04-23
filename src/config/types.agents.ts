@@ -88,6 +88,8 @@ export type AgentConfig = {
   fastModeDefault?: boolean;
   /** Optional allowlist of skills for this agent; omitting it inherits agents.defaults.skills when set, and an explicit list replaces defaults instead of merging. */
   skills?: string[];
+  /** Accounts this agent may explicitly send as instead of its bound default. Empty/omitted means no impersonation. */
+  canImpersonateAccounts?: string[];
   memorySearch?: MemorySearchConfig;
   /** Human-like delay between block replies for this agent. */
   humanDelay?: HumanDelayConfig;

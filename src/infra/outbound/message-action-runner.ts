@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import {
@@ -32,6 +35,7 @@ import {
   type GatewayClientMode,
   type GatewayClientName,
 } from "../../utils/message-channel.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { formatErrorMessage } from "../errors.js";
 import { throwIfAborted } from "./abort.js";
 import { resolveOutboundChannelPlugin } from "./channel-resolution.js";
@@ -79,6 +83,8 @@ export type MessageActionRunnerGateway = {
   clientDisplayName?: string;
   mode: GatewayClientMode;
 };
+
+const auditLog = createSubsystemLogger("outbound-audit");
 
 let messageActionGatewayRuntimePromise: Promise<
   typeof import("./message.gateway.runtime.js")
@@ -164,6 +170,69 @@ export function getToolResult(
   result: MessageActionRunResult,
 ): AgentToolResult<unknown> | undefined {
   return "toolResult" in result ? result.toolResult : undefined;
+}
+
+
+function maskSecret(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) {
+    return undefined;
+  }
+  if (value.length <= 8) {
+    return "****";
+  }
+  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+}
+
+function resolveMaskedBotToken(cfg: OpenClawConfig, channel: string, accountId?: string | null) {
+  const channels = (cfg as unknown as { channels?: Record<string, unknown> }).channels;
+  const channelCfg = channels?.[channel];
+  if (!channelCfg || typeof channelCfg !== "object") {
+    return undefined;
+  }
+  const record = channelCfg as Record<string, unknown>;
+  const accounts = record.accounts;
+  const account =
+    accountId && accounts && typeof accounts === "object"
+      ? (accounts as Record<string, unknown>)[accountId]
+      : undefined;
+  const source = account && typeof account === "object" ? (account as Record<string, unknown>) : record;
+  return (
+    maskSecret(source.botToken) ??
+    maskSecret(source.token) ??
+    maskSecret(source.appToken) ??
+    maskSecret(source.webhookUrl)
+  );
+}
+
+async function appendOutboundAudit(params: {
+  cfg: OpenClawConfig;
+  channel: string;
+  action: string;
+  accountId?: string | null;
+  agentId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  target?: string;
+  dryRun: boolean;
+}) {
+  const entry = {
+    ts: new Date().toISOString(),
+    channel: params.channel,
+    action: params.action,
+    target: params.target,
+    dryRun: params.dryRun,
+    sendingAgentId: params.agentId,
+    sendingAccountId: params.accountId ?? undefined,
+    originSessionKey: params.sessionKey ?? params.sessionId,
+    botTokenMasked: resolveMaskedBotToken(params.cfg, params.channel, params.accountId),
+  };
+  try {
+    const logPath = path.join(os.homedir(), ".openclaw", "logs", "outbound-audit.jsonl");
+    await fs.mkdir(path.dirname(logPath), { recursive: true });
+    await fs.appendFile(logPath, `${JSON.stringify(entry)}\n`, "utf8");
+  } catch (err) {
+    auditLog.warn("failed to append outbound audit log", { errorMessage: formatErrorMessage(err) });
+  }
 }
 
 function resolveGatewayActionOptions(gateway?: MessageActionRunnerGateway) {
@@ -846,6 +915,17 @@ export async function runMessageAction(
     params.accountId = accountId;
   }
   const dryRun = Boolean(input.dryRun ?? readBooleanParam(params, "dryRun"));
+  await appendOutboundAudit({
+    cfg,
+    channel,
+    action,
+    accountId,
+    agentId: resolvedAgentId,
+    sessionKey: input.sessionKey,
+    sessionId: input.sessionId,
+    target: normalizeOptionalString(params.to) ?? normalizeOptionalString(params.target),
+    dryRun,
+  });
   const normalizationPolicy = resolveAttachmentMediaPolicy({
     sandboxRoot: input.sandboxRoot,
     mediaLocalRoots: getAgentScopedMediaLocalRoots(cfg, resolvedAgentId),

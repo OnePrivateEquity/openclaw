@@ -23,6 +23,7 @@ import {
   deriveChannel,
   resolveDisplaySessionKey,
   resolveEffectiveSessionToolsVisibility,
+  resolveSessionToolsAgentAllowlist,
   resolveInternalSessionKey,
   resolveSandboxedSessionToolContext,
   type SessionListRow,
@@ -118,6 +119,7 @@ export function createSessionsListTool(opts?: {
         requesterSessionKey: effectiveRequesterKey,
         visibility,
         a2aPolicy,
+        agentAllowlist: resolveSessionToolsAgentAllowlist(cfg),
       });
       const rows: SessionListRow[] = [];
       const historyTargets: Array<{ row: SessionListRow; resolvedKey: string }> = [];

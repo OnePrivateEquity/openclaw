@@ -297,6 +297,96 @@ function containsRealConversationMessages(messages: AgentMessage[]): boolean {
   );
 }
 
+
+const COMPACTION_CATEGORY_PREFIX =
+  "Your earlier session touched: [%s]. Some details may be truncated; grep your session file before claiming you didn't do something.";
+
+const TOOL_CATEGORY_BY_PREFIX: Array<[string, string]> = [
+  ["gateway", "gateway"],
+  ["message", "message"],
+  ["sessions_", "sessions"],
+  ["session", "sessions"],
+  ["cron", "cron"],
+  ["browser", "browser"],
+  ["canvas", "browser"],
+  ["exec", "exec"],
+  ["process", "exec"],
+  ["read", "file-edit"],
+  ["write", "file-edit"],
+  ["edit", "file-edit"],
+  ["apply_patch", "file-edit"],
+];
+
+function classifyCompactionToolCategory(toolName: string): string {
+  const normalized = toolName.trim().toLowerCase();
+  for (const [prefix, category] of TOOL_CATEGORY_BY_PREFIX) {
+    if (normalized === prefix || normalized.startsWith(`${prefix}.`) || normalized.startsWith(prefix)) {
+      return category;
+    }
+  }
+  return "other";
+}
+
+function collectToolNamesFromContent(content: unknown, out: Set<string>) {
+  if (!content) {
+    return;
+  }
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      collectToolNamesFromContent(item, out);
+    }
+    return;
+  }
+  if (typeof content !== "object") {
+    return;
+  }
+  const record = content as Record<string, unknown>;
+  const maybeName = record.name ?? record.toolName ?? record.tool_name;
+  const type = typeof record.type === "string" ? record.type.toLowerCase() : "";
+  if (typeof maybeName === "string" && (type.includes("tool") || type.includes("function"))) {
+    out.add(maybeName);
+  }
+}
+
+export function buildCompactionFidelitySummaryPrefix(messages: AgentMessage[]): string | undefined {
+  const categories = new Set<string>();
+  const toolNames = new Set<string>();
+  for (const message of messages) {
+    const role = (message as { role?: unknown }).role;
+    if (role === "user" || role === "assistant") {
+      const content = (message as { content?: unknown }).content;
+      if (typeof content === "string" && content.trim()) {
+        categories.add("chat");
+      }
+    }
+    const directName = (message as { name?: unknown; toolName?: unknown; tool?: unknown }).name ??
+      (message as { toolName?: unknown }).toolName ??
+      (message as { tool?: unknown }).tool;
+    if (typeof directName === "string") {
+      toolNames.add(directName);
+    }
+    collectToolNamesFromContent((message as { content?: unknown }).content, toolNames);
+  }
+  for (const toolName of toolNames) {
+    categories.add(classifyCompactionToolCategory(toolName));
+  }
+  if (categories.size <= 1) {
+    return undefined;
+  }
+  const ordered = ["chat", "gateway", "file-edit", "exec", "browser", "message", "cron", "sessions", "other"].filter((category) => categories.has(category));
+  return COMPACTION_CATEGORY_PREFIX.replace("%s", ordered.join(", ")) +
+    "\n" +
+    ordered.map((category) => `- ${category}: earlier ${category} activity was present before compaction.`).join("\n");
+}
+
+function applyCompactionFidelityPrefix(summary: string, messages: AgentMessage[]): string {
+  const prefix = buildCompactionFidelitySummaryPrefix(messages);
+  if (!prefix || summary.startsWith("Your earlier session touched:")) {
+    return summary;
+  }
+  return `${prefix}\n\n${summary}`;
+}
+
 /**
  * Core compaction logic without lane queueing.
  * Use this when already inside a session/global lane to avoid deadlocks.
@@ -1003,6 +1093,7 @@ export async function compactEmbeddedPiSessionDirect(
               },
             },
           );
+          result.summary = applyCompactionFidelityPrefix(result.summary, limited);
           await runPostCompactionSideEffects({
             config: params.config,
             sessionKey: params.sessionKey,

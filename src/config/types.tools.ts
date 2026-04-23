@@ -179,7 +179,7 @@ export type ToolLoopDetectionConfig = {
   detectors?: ToolLoopDetectionDetectorConfig;
 };
 
-export type SessionsToolsVisibility = "self" | "tree" | "agent" | "all";
+export type SessionsToolsVisibility = "self" | "tree" | "agent" | "own" | "agentAllowlist" | "all";
 
 export type ToolPolicyConfig = {
   allow?: string[];
@@ -598,16 +598,19 @@ export type ToolsConfig = {
    * Session tool visibility controls which sessions can be targeted by session tools
    * (sessions_list, sessions_history, sessions_send).
    *
-   * Default: "tree" (current session + spawned subagent sessions).
+   * Default: "own" (any session belonging to the current agent id).
    */
   sessions?: {
     /**
      * - "self": only the current session
-     * - "tree": current session + sessions spawned by this session (default)
-     * - "agent": any session belonging to the current agent id (can include other users)
+     * - "tree": current session + sessions spawned by this session
+     * - "agent"/"own": any session belonging to the current agent id (default; can include other users)
+     * - "agentAllowlist": own sessions plus named agents in agentAllowlist (cross-agent still requires tools.agentToAgent)
      * - "all": any session (cross-agent still requires tools.agentToAgent)
      */
     visibility?: SessionsToolsVisibility;
+    /** Agent ids visible when visibility is "agentAllowlist". */
+    agentAllowlist?: string[];
   };
   /** Elevated exec permissions for the host machine. */
   elevated?: {

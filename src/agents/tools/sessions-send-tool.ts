@@ -3,6 +3,7 @@ import { Type } from "@sinclair/typebox";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { callGateway } from "../../gateway/call.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { normalizeAgentId, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { SESSION_LABEL_MAX_LENGTH } from "../../sessions/session-label.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
@@ -25,12 +26,16 @@ import {
   createSessionVisibilityGuard,
   createAgentToAgentPolicy,
   resolveEffectiveSessionToolsVisibility,
+  resolveSessionToolsAgentAllowlist,
   resolveSessionReference,
   resolveSessionToolContext,
   resolveVisibleSessionReference,
 } from "./sessions-helpers.js";
 import { buildAgentToAgentMessageContext, resolvePingPongTurns } from "./sessions-send-helpers.js";
+import { IDENTITY_ENFORCEMENT_CODE } from "./identity-enforcement.js";
 import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
+
+const log = createSubsystemLogger("sessions-send");
 
 const SessionsSendToolSchema = Type.Object({
   sessionKey: Type.Optional(Type.String()),
@@ -236,11 +241,36 @@ export function createSessionsSendTool(opts?: {
       const announceTimeoutMs = timeoutSeconds === 0 ? 30_000 : timeoutMs;
       const idempotencyKey = crypto.randomUUID();
       let runId: string = idempotencyKey;
+      const requesterAgentId = resolveAgentIdFromSessionKey(effectiveRequesterKey);
+      const targetAgentId = resolveAgentIdFromSessionKey(resolvedKey);
+      if (requesterAgentId !== targetAgentId) {
+        const explicitAllow = Array.isArray(cfg.tools?.agentToAgent?.allow)
+          ? cfg.tools.agentToAgent.allow
+          : [];
+        if (explicitAllow.length === 0 || !a2aPolicy.isAllowed(requesterAgentId, targetAgentId)) {
+          log.warn("[security] blocked cross-agent sessions_send", {
+            requesterAgentId,
+            targetAgentId,
+            originSessionKey: effectiveRequesterKey,
+            targetSessionKey: resolvedKey,
+          });
+          return jsonResult({
+            runId: crypto.randomUUID(),
+            status: "forbidden",
+            code: IDENTITY_ENFORCEMENT_CODE,
+            httpStatus: 403,
+            error:
+              "Identity enforcement blocked sessions_send to a foreign agent session. Add an explicit tools.agentToAgent.allow entry for audited cross-agent sends.",
+            sessionKey: displayKey,
+          });
+        }
+      }
       const visibilityGuard = await createSessionVisibilityGuard({
         action: "send",
         requesterSessionKey: effectiveRequesterKey,
         visibility: sessionVisibility,
         a2aPolicy,
+        agentAllowlist: resolveSessionToolsAgentAllowlist(cfg),
       });
       const access = visibilityGuard.check(resolvedKey);
       if (!access.allowed) {

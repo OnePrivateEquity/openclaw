@@ -43,6 +43,7 @@ import {
   shouldResolveSessionIdInput,
   createAgentToAgentPolicy,
   resolveEffectiveSessionToolsVisibility,
+  resolveSessionToolsAgentAllowlist,
   resolveInternalSessionKey,
   resolveSessionReference,
   resolveSandboxedSessionToolContext,

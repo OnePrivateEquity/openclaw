@@ -682,6 +682,37 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
         }
       }
 
+      const targetAccountId = readStringParam(params, "accountId");
+      if (targetAccountId && agentAccountId && targetAccountId !== agentAccountId) {
+        const allowlist =
+          options?.config?.agents?.list?.find((agent) => agent.id === resolvedAgentId)
+            ?.canImpersonateAccounts ?? [];
+        if (!allowlist.includes(targetAccountId)) {
+          console.warn("[security] identity-enforcement: rejected cross-account message", {
+            sendingAgentId: resolvedAgentId,
+            sendingAccountId: agentAccountId,
+            targetAccountId,
+            channel: params.channel,
+          });
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `identity_enforcement: agent '${resolvedAgentId}' (account '${agentAccountId}') may not post as account '${targetAccountId}'. Add '${targetAccountId}' to agents.list[].canImpersonateAccounts to allow this.`,
+              },
+            ],
+            details: {
+              status: "forbidden",
+              code: "IDENTITY_ENFORCEMENT",
+              sendingAgentId: resolvedAgentId,
+              sendingAccountId: agentAccountId,
+              targetAccountId,
+            },
+          };
+        }
+      }
+
       const action = readStringParam(params, "action", {
         required: true,
       }) as ChannelMessageActionName;
@@ -730,7 +761,6 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
       if (accountId) {
         params.accountId = accountId;
       }
-
       const gatewayResolved = resolveGatewayOptions({
         gatewayUrl: readStringParam(params, "gatewayUrl", { trim: false }),
         gatewayToken: readStringParam(params, "gatewayToken", { trim: false }),

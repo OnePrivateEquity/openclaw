@@ -824,6 +824,7 @@ export const AgentEntrySchema = z
     reasoningDefault: z.enum(["on", "off", "stream"]).optional(),
     fastModeDefault: z.boolean().optional(),
     skills: z.array(z.string()).optional(),
+    canImpersonateAccounts: z.array(z.string()).optional(),
     memorySearch: MemorySearchSchema,
     humanDelay: HumanDelaySchema.optional(),
     skillsLimits: AgentSkillsLimitsSchema,
@@ -871,7 +872,8 @@ export const ToolsSchema = z
     links: ToolsLinksSchema,
     sessions: z
       .object({
-        visibility: z.enum(["self", "tree", "agent", "all"]).optional(),
+        visibility: z.enum(["self", "tree", "agent", "own", "agentAllowlist", "all"]).optional(),
+        agentAllowlist: z.array(z.string()).optional(),
       })
       .strict()
       .optional(),
