@@ -614,8 +614,9 @@ export class VoiceCallWebhookServer {
 
     const params = new URLSearchParams(ctx.rawBody);
     const direction = params.get("Direction");
-    const isInbound = !direction || direction === "inbound";
-    if (!isInbound) {
+    const isRealtimeConnectDirection =
+      !direction || direction === "inbound" || direction === "outbound-api";
+    if (!isRealtimeConnectDirection) {
       return false;
     }
 

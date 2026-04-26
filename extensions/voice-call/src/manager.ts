@@ -273,7 +273,15 @@ export class CallManager {
   }
 
   private shouldDeferConversationInitialMessageUntilStreamConnect(): boolean {
-    if (!this.provider || this.provider.name !== "twilio" || !this.config.streaming.enabled) {
+    if (!this.provider || this.provider.name !== "twilio") {
+      return false;
+    }
+
+    if (this.config.realtime.enabled) {
+      return true;
+    }
+
+    if (!this.config.streaming.enabled) {
       return false;
     }
 

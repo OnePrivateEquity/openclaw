@@ -191,6 +191,31 @@ describe("CallManager notify and mapping", () => {
     expect(provider.playTtsCalls).toHaveLength(0);
   });
 
+  it("waits for realtime stream connect even when transcription streaming is disabled", async () => {
+    const { manager, provider } = await createManagerHarness(
+      { realtime: { enabled: true } },
+      new FakeProvider("twilio"),
+    );
+
+    const { callId, success } = await manager.initiateCall("+15550000010", undefined, {
+      message: "Realtime stream",
+      mode: "conversation",
+    });
+    expect(success).toBe(true);
+
+    manager.processEvent({
+      id: "evt-conversation-twilio-realtime",
+      type: "call.answered",
+      callId,
+      providerCallId: "call-uuid",
+      timestamp: Date.now(),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(provider.playTtsCalls).toHaveLength(0);
+  });
+
   it("speaks on answered when Twilio streaming is enabled but stream-connect path is unavailable", async () => {
     const twilioProvider = new FakeProvider("twilio");
     twilioProvider.twilioStreamConnectEnabled = false;
