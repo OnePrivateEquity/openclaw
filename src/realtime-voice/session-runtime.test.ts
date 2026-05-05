@@ -193,7 +193,7 @@ describe("realtime voice bridge session runtime", () => {
     await session.connect();
     expect(bridge.triggerGreeting).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.advanceTimersByTimeAsync(250);
 
     expect(bridge.triggerGreeting).toHaveBeenCalledTimes(1);
     expect(bridge.triggerGreeting).toHaveBeenCalledWith("Say why you are calling");
@@ -223,7 +223,7 @@ describe("realtime voice bridge session runtime", () => {
 
     await session.connect();
     callbacks?.onReady?.();
-    await vi.advanceTimersByTimeAsync(1_500);
+    await vi.advanceTimersByTimeAsync(250);
 
     expect(bridge.triggerGreeting).toHaveBeenCalledTimes(1);
   });

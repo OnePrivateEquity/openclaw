@@ -187,7 +187,7 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
 
   triggerGreeting(instructions?: string): void {
     const greetingInstructions = instructions ?? this.config.instructions;
-    if (!this.isConnected() || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    if (!this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       this.pendingGreetingInstructions = greetingInstructions;
       return;
     }

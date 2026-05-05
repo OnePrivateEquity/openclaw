@@ -142,7 +142,7 @@ describe("buildOpenAIRealtimeVoiceProvider", () => {
     expect(bridge.isConnected()).toBe(true);
   });
 
-  it("queues greeting requests until the realtime session is configured", async () => {
+  it("sends greeting requests as soon as the realtime websocket is open", async () => {
     const provider = buildOpenAIRealtimeVoiceProvider();
     const bridge = provider.createBridge({
       providerConfig: { apiKey: "sk-test" }, // pragma: allowlist secret
@@ -161,9 +161,6 @@ describe("buildOpenAIRealtimeVoiceProvider", () => {
     await connecting;
 
     bridge.triggerGreeting("Open with the call reason.");
-    expect(parseSent(socket).map((event) => event.type)).toEqual(["session.update"]);
-
-    socket.emit("message", Buffer.from(JSON.stringify({ type: "session.updated" })));
 
     expect(parseSent(socket).map((event) => event.type)).toEqual([
       "session.update",

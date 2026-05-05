@@ -80,7 +80,7 @@ export function createRealtimeVoiceBridgeSession(
       if (params.triggerGreetingOnReady && !readyNotified) {
         greetingFallbackTimer = setTimeout(() => {
           triggerInitialGreetingOnce();
-        }, 1_500);
+        }, 250);
       }
     },
     sendAudio: (audio) => requireBridge().sendAudio(audio),
