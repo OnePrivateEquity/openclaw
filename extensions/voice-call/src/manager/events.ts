@@ -220,6 +220,7 @@ export function processEvent(ctx: EventContext, event: NormalizedEvent): void {
       break;
 
     case "call.speaking":
+      addTranscriptEntry(call, "bot", event.text);
       transitionState(call, "speaking");
       break;
 

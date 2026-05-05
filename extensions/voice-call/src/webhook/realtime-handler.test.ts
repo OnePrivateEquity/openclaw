@@ -338,6 +338,73 @@ describe("RealtimeCallHandler path routing", () => {
 });
 
 describe("RealtimeCallHandler websocket hardening", () => {
+  it("passes outbound initial messages as deterministic realtime opening instructions", async () => {
+    const triggerGreeting = vi.fn();
+    let onReady: (() => void) | undefined;
+    const callRecord = {
+      callId: "call-outbound",
+      providerCallId: "CA-outbound",
+      provider: "twilio",
+      direction: "outbound",
+      state: "initiated",
+      from: "+15550000000",
+      to: "+15550000001",
+      startedAt: Date.now(),
+      transcript: [],
+      processedEventIds: [],
+      metadata: {
+        initialMessage: "Hi Nathan, this is Soc. I am calling to verify the same-mind voice fix.",
+        mode: "conversation",
+      },
+    };
+    const handler = makeHandler(undefined, {
+      manager: {
+        processEvent: vi.fn(),
+        getCallByProviderCallId: vi.fn(() => callRecord),
+      },
+      realtimeProvider: makeRealtimeProvider((req) => {
+        onReady = req.onReady;
+        return {
+          ...makeBridge(),
+          connect: async () => {
+            onReady?.();
+          },
+          triggerGreeting,
+        };
+      }),
+    });
+    const server = await startRealtimeServer(handler);
+
+    try {
+      const ws = await connectWs(server.url);
+      try {
+        ws.send(
+          JSON.stringify({
+            event: "start",
+            start: {
+              streamSid: "MZ-outbound",
+              callSid: "CA-outbound",
+            },
+          }),
+        );
+
+        await vi.waitFor(() => expect(triggerGreeting).toHaveBeenCalledTimes(1));
+        const instructions = triggerGreeting.mock.calls[0]?.[0] as string;
+        expect(instructions).toContain("first spoken response MUST identify yourself");
+        expect(instructions).toContain('Do not open with "How can I help you?"');
+        expect(instructions).toContain("same-mind voice fix");
+        expect(callRecord.metadata.initialMessage).toBeUndefined();
+        expect(callRecord.metadata.realtimeBootReason).toContain("same-mind voice fix");
+      } finally {
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
   it("rejects oversized pre-start frames before bridge setup", async () => {
     const createBridge = vi.fn(() => makeBridge());
     const processEvent = vi.fn();

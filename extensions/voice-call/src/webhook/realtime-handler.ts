@@ -44,7 +44,7 @@ function buildGreetingInstructions(
     return baseInstructions;
   }
   const intro =
-    "Start the call by greeting the caller naturally. Include this greeting in your first spoken reply:";
+    'You are starting a live phone call. Your first spoken response MUST identify yourself and state why you are calling. Use the following opening instruction as the actual first-turn content, not as vague background. Do not open with "How can I help you?" for an outbound call. Opening instruction:';
   return baseInstructions
     ? `${baseInstructions}\n\n${intro} "${trimmedGreeting}"`
     : `${intro} "${trimmedGreeting}"`;
@@ -239,6 +239,7 @@ export class RealtimeCallHandler {
     }
 
     const { callId, initialGreetingInstructions } = registration;
+    const hasInitialGreeting = Boolean(initialGreetingInstructions?.trim());
     let callEndEmitted = false;
     const emitCallEnd = (reason: "completed" | "error") => {
       if (callEndEmitted) {
@@ -308,6 +309,11 @@ export class RealtimeCallHandler {
           toolEvent.args,
         );
       },
+      onReady: () => {
+        console.log(
+          `[voice-call] realtime opening turn requested: callId=${callId} providerCallId=${callSid} reasonPresent=${hasInitialGreeting}`,
+        );
+      },
       onError: (error) => {
         console.error("[voice-call] realtime voice error:", error.message);
       },
@@ -367,7 +373,8 @@ export class RealtimeCallHandler {
     }
 
     const initialGreeting = this.extractInitialGreeting(callRecord);
-    if (callRecord.metadata) {
+    if (callRecord.metadata && initialGreeting) {
+      callRecord.metadata.realtimeBootReason = initialGreeting;
       delete callRecord.metadata.initialMessage;
     }
 
