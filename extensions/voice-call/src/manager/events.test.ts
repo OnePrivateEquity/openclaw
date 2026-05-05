@@ -417,6 +417,46 @@ describe("processEvent (functional)", () => {
     expect(Array.from(ctx.processedEventIds)).toEqual(["stable-key-1"]);
   });
 
+  it("stores assistant realtime speech in the transcript", () => {
+    const now = Date.now();
+    const ctx = createContext();
+    ctx.activeCalls.set("call-bot-transcript", {
+      callId: "call-bot-transcript",
+      providerCallId: "provider-bot-transcript",
+      provider: "plivo",
+      direction: "outbound",
+      state: "answered",
+      from: "+15550000000",
+      to: "+15550000001",
+      startedAt: now,
+      transcript: [],
+      processedEventIds: [],
+      metadata: {},
+    });
+    ctx.providerCallIdMap.set("provider-bot-transcript", "call-bot-transcript");
+
+    processEvent(ctx, {
+      id: "evt-bot-speaking",
+      type: "call.speaking",
+      callId: "call-bot-transcript",
+      providerCallId: "provider-bot-transcript",
+      timestamp: now + 1,
+      text: "Hi Nathan, this is Soc. I am calling to verify the same-mind voice fix.",
+    });
+
+    const call = ctx.activeCalls.get("call-bot-transcript");
+    if (!call) {
+      throw new Error("expected call to remain active");
+    }
+    expect(call.state).toBe("speaking");
+    expect(call.transcript).toEqual([
+      expect.objectContaining({
+        speaker: "bot",
+        text: "Hi Nathan, this is Soc. I am calling to verify the same-mind voice fix.",
+      }),
+    ]);
+  });
+
   it("keeps retryable call.error events replayable", () => {
     const now = Date.now();
     const ctx = createContext();
