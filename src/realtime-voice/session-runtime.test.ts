@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RealtimeVoiceProviderPlugin } from "../plugins/types.js";
 import {
   REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
@@ -21,6 +21,9 @@ function makeBridge(overrides: Partial<RealtimeVoiceBridge> = {}): RealtimeVoice
 }
 
 describe("realtime voice bridge session runtime", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
   it("routes provider output through an open audio sink", () => {
     let callbacks: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0] | undefined;
     const bridge = makeBridge();
@@ -167,6 +170,62 @@ describe("realtime voice bridge session runtime", () => {
 
     expect(bridge.triggerGreeting).toHaveBeenCalledWith("Say hello");
     expect(onToolCall).toHaveBeenCalledWith(event, session);
+  });
+
+  it("falls back to triggering the initial greeting after connect when provider readiness never fires", async () => {
+    vi.useFakeTimers();
+    const bridge = makeBridge();
+    const provider: RealtimeVoiceProviderPlugin = {
+      id: "test",
+      label: "Test",
+      isConfigured: () => true,
+      createBridge: () => bridge,
+    };
+
+    const session = createRealtimeVoiceBridgeSession({
+      provider,
+      providerConfig: {},
+      audioSink: { sendAudio: vi.fn() },
+      initialGreetingInstructions: "Say why you are calling",
+      triggerGreetingOnReady: true,
+    });
+
+    await session.connect();
+    expect(bridge.triggerGreeting).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(bridge.triggerGreeting).toHaveBeenCalledTimes(1);
+    expect(bridge.triggerGreeting).toHaveBeenCalledWith("Say why you are calling");
+  });
+
+  it("does not double-trigger the initial greeting when provider readiness fires before fallback", async () => {
+    vi.useFakeTimers();
+    let callbacks: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0] | undefined;
+    const bridge = makeBridge();
+    const provider: RealtimeVoiceProviderPlugin = {
+      id: "test",
+      label: "Test",
+      isConfigured: () => true,
+      createBridge: (request) => {
+        callbacks = request;
+        return bridge;
+      },
+    };
+
+    const session = createRealtimeVoiceBridgeSession({
+      provider,
+      providerConfig: {},
+      audioSink: { sendAudio: vi.fn() },
+      initialGreetingInstructions: "Say why you are calling",
+      triggerGreetingOnReady: true,
+    });
+
+    await session.connect();
+    callbacks?.onReady?.();
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(bridge.triggerGreeting).toHaveBeenCalledTimes(1);
   });
 
   it("forwards tool result continuation options to the provider bridge", () => {

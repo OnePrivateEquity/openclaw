@@ -142,6 +142,39 @@ describe("buildOpenAIRealtimeVoiceProvider", () => {
     expect(bridge.isConnected()).toBe(true);
   });
 
+  it("queues greeting requests until the realtime session is configured", async () => {
+    const provider = buildOpenAIRealtimeVoiceProvider();
+    const bridge = provider.createBridge({
+      providerConfig: { apiKey: "sk-test" }, // pragma: allowlist secret
+      instructions: "Be helpful.",
+      onAudio: vi.fn(),
+      onClearAudio: vi.fn(),
+    });
+    const connecting = bridge.connect();
+    const socket = FakeWebSocket.instances[0];
+    if (!socket) {
+      throw new Error("expected bridge to create a websocket");
+    }
+
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.emit("open");
+    await connecting;
+
+    bridge.triggerGreeting("Open with the call reason.");
+    expect(parseSent(socket).map((event) => event.type)).toEqual(["session.update"]);
+
+    socket.emit("message", Buffer.from(JSON.stringify({ type: "session.updated" })));
+
+    expect(parseSent(socket).map((event) => event.type)).toEqual([
+      "session.update",
+      "response.create",
+    ]);
+    expect(JSON.parse(socket.sent[1] ?? "{}")).toMatchObject({
+      type: "response.create",
+      response: { instructions: "Open with the call reason." },
+    });
+  });
+
   it("can request PCM16 24 kHz realtime audio for Chrome command-pair bridges", async () => {
     const provider = buildOpenAIRealtimeVoiceProvider();
     const bridge = provider.createBridge({

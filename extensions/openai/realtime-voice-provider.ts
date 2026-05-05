@@ -136,6 +136,7 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private intentionallyClosed = false;
   private reconnectAttempts = 0;
   private pendingAudio: Buffer[] = [];
+  private pendingGreetingInstructions: string | undefined;
   private markQueue: string[] = [];
   private responseStartTimestamp: number | null = null;
   private latestMediaTimestamp = 0;
@@ -185,13 +186,16 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   triggerGreeting(instructions?: string): void {
-    if (!this.isConnected() || !this.ws) {
+    const greetingInstructions = instructions ?? this.config.instructions;
+    if (!this.isConnected() || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.pendingGreetingInstructions = greetingInstructions;
       return;
     }
+    this.pendingGreetingInstructions = undefined;
     this.sendEvent({
       type: "response.create",
       response: {
-        instructions: instructions ?? this.config.instructions,
+        instructions: greetingInstructions,
       },
     });
   }
@@ -223,6 +227,7 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.intentionallyClosed = true;
     this.connected = false;
     this.sessionConfigured = false;
+    this.pendingGreetingInstructions = undefined;
     if (this.ws) {
       this.ws.close(1000, "Bridge closed");
       this.ws = null;
@@ -449,6 +454,9 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
         this.sessionConfigured = true;
         for (const chunk of this.pendingAudio.splice(0)) {
           this.sendAudio(chunk);
+        }
+        if (this.pendingGreetingInstructions !== undefined) {
+          this.triggerGreeting(this.pendingGreetingInstructions);
         }
         if (!this.sessionReadyFired) {
           this.sessionReadyFired = true;

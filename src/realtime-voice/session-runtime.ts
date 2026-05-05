@@ -52,6 +52,16 @@ export function createRealtimeVoiceBridgeSession(
   params: RealtimeVoiceBridgeSessionParams,
 ): RealtimeVoiceBridgeSession {
   let bridge: RealtimeVoiceBridge | undefined;
+  let initialGreetingTriggered = false;
+  let readyNotified = false;
+  let greetingFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+  const triggerInitialGreetingOnce = () => {
+    if (!bridge || initialGreetingTriggered || !params.triggerGreetingOnReady) {
+      return;
+    }
+    initialGreetingTriggered = true;
+    bridge.triggerGreeting?.(params.initialGreetingInstructions);
+  };
   const requireBridge = () => {
     if (!bridge) {
       throw new Error("Realtime voice bridge is not ready");
@@ -64,7 +74,15 @@ export function createRealtimeVoiceBridgeSession(
     },
     acknowledgeMark: () => requireBridge().acknowledgeMark(),
     close: () => requireBridge().close(),
-    connect: () => requireBridge().connect(),
+    connect: async () => {
+      const activeBridge = requireBridge();
+      await activeBridge.connect();
+      if (params.triggerGreetingOnReady && !readyNotified) {
+        greetingFallbackTimer = setTimeout(() => {
+          triggerInitialGreetingOnce();
+        }, 1_500);
+      }
+    },
     sendAudio: (audio) => requireBridge().sendAudio(audio),
     sendUserMessage: (text) => requireBridge().sendUserMessage?.(text),
     setMediaTimestamp: (ts) => requireBridge().setMediaTimestamp(ts),
@@ -111,9 +129,12 @@ export function createRealtimeVoiceBridgeSession(
       if (!bridge) {
         return;
       }
-      if (params.triggerGreetingOnReady) {
-        bridge.triggerGreeting?.(params.initialGreetingInstructions);
+      readyNotified = true;
+      if (greetingFallbackTimer) {
+        clearTimeout(greetingFallbackTimer);
+        greetingFallbackTimer = undefined;
       }
+      triggerInitialGreetingOnce();
       params.onReady?.(session);
     },
     onError: params.onError,
