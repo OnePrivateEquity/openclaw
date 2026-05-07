@@ -28,7 +28,7 @@ export type RealtimeVoiceBridgeSession = {
   sendUserMessage(text: string): void;
   setMediaTimestamp(ts: number): void;
   submitToolResult(callId: string, result: unknown, options?: RealtimeVoiceToolResultOptions): void;
-  triggerGreeting(instructions?: string): void;
+  triggerGreeting(instructions?: string, trigger?: string): void;
 };
 
 export type RealtimeVoiceBridgeSessionParams = {
@@ -55,12 +55,19 @@ export function createRealtimeVoiceBridgeSession(
   let initialGreetingTriggered = false;
   let readyNotified = false;
   let greetingFallbackTimer: ReturnType<typeof setTimeout> | undefined;
-  const triggerInitialGreetingOnce = () => {
+  const triggerInitialGreetingOnce = (trigger: string) => {
     if (!bridge || initialGreetingTriggered || !params.triggerGreetingOnReady) {
       return;
     }
     initialGreetingTriggered = true;
-    bridge.triggerGreeting?.(params.initialGreetingInstructions);
+    console.info(
+      `[voice-bridge] ${JSON.stringify({
+        event: "boot_response.trigger",
+        trigger,
+        instructionsPresent: Boolean(params.initialGreetingInstructions?.trim()),
+      })}`,
+    );
+    bridge.triggerGreeting?.(params.initialGreetingInstructions, trigger);
   };
   const requireBridge = () => {
     if (!bridge) {
@@ -79,7 +86,7 @@ export function createRealtimeVoiceBridgeSession(
       await activeBridge.connect();
       if (params.triggerGreetingOnReady && !readyNotified) {
         greetingFallbackTimer = setTimeout(() => {
-          triggerInitialGreetingOnce();
+          triggerInitialGreetingOnce("250ms fallback");
         }, 250);
       }
     },
@@ -88,7 +95,8 @@ export function createRealtimeVoiceBridgeSession(
     setMediaTimestamp: (ts) => requireBridge().setMediaTimestamp(ts),
     submitToolResult: (callId, result, options) =>
       requireBridge().submitToolResult(callId, result, options),
-    triggerGreeting: (instructions) => requireBridge().triggerGreeting?.(instructions),
+    triggerGreeting: (instructions, trigger = "manual") =>
+      requireBridge().triggerGreeting?.(instructions, trigger),
   };
   const canSendAudio = () => params.audioSink.isOpen?.() ?? true;
   bridge = params.provider.createBridge({
@@ -134,7 +142,7 @@ export function createRealtimeVoiceBridgeSession(
         clearTimeout(greetingFallbackTimer);
         greetingFallbackTimer = undefined;
       }
-      triggerInitialGreetingOnce();
+      triggerInitialGreetingOnce("session.updated");
       params.onReady?.(session);
     },
     onError: params.onError,

@@ -9,7 +9,12 @@ import type { VoiceCallRealtimeConfig } from "../config.js";
 import type { CallManager } from "../manager.js";
 import type { VoiceCallProvider } from "../providers/base.js";
 import type { CallRecord } from "../types.js";
-import { connectWs, startUpgradeWsServer, waitForClose } from "../websocket-test-support.js";
+import {
+  connectWs,
+  startUpgradeWsServer,
+  waitForClose,
+  withTimeout,
+} from "../websocket-test-support.js";
 import { RealtimeCallHandler } from "./realtime-handler.js";
 
 function makeRequest(url: string, host = "gateway.ts.net"): http.IncomingMessage {
@@ -395,6 +400,119 @@ describe("RealtimeCallHandler websocket hardening", () => {
         expect(instructions).toContain("same-mind voice fix");
         expect(callRecord.metadata.initialMessage).toBeUndefined();
         expect(callRecord.metadata.realtimeBootReason).toContain("same-mind voice fix");
+      } finally {
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("bridges simulated Twilio media stream audio in both directions", async () => {
+    let callbacks: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0] | undefined;
+    const bridgeSendAudio = vi.fn();
+    const callRecord: CallRecord = {
+      callId: "call-sim",
+      providerCallId: "CA-sim",
+      provider: "twilio",
+      direction: "outbound",
+      state: "initiated",
+      from: "+15550000000",
+      to: "+15550000001",
+      startedAt: Date.now(),
+      transcript: [],
+      processedEventIds: [],
+      metadata: {
+        initialMessage: "Hi Nathan, this is Soc testing the media bridge.",
+        mode: "conversation",
+      },
+    };
+    const handler = makeHandler(undefined, {
+      manager: {
+        processEvent: vi.fn(),
+        getCallByProviderCallId: vi.fn(() => callRecord),
+      },
+      realtimeProvider: makeRealtimeProvider((req) => {
+        callbacks = req;
+        return makeBridge({
+          connect: async () => {
+            req.onReady?.();
+          },
+          sendAudio: bridgeSendAudio,
+        });
+      }),
+    });
+    const server = await startRealtimeServer(handler);
+
+    try {
+      const ws = await connectWs(server.url);
+      try {
+        ws.send(
+          JSON.stringify({
+            event: "connected",
+            protocol: "Call",
+            version: "1.0.0",
+          }),
+        );
+        ws.send(
+          JSON.stringify({
+            event: "start",
+            start: {
+              streamSid: "MZ-sim",
+              callSid: "CA-sim",
+              mediaFormat: {
+                encoding: "audio/x-mulaw",
+                sampleRate: 8000,
+                channels: 1,
+              },
+            },
+          }),
+        );
+
+        await vi.waitFor(() => expect(callbacks).toBeDefined());
+
+        const callerAudio = Buffer.from([1, 2, 3, 4]);
+        ws.send(
+          JSON.stringify({
+            event: "media",
+            streamSid: "MZ-sim",
+            media: { payload: callerAudio.toString("base64"), timestamp: "20" },
+          }),
+        );
+
+        await vi.waitFor(() => {
+          expect(bridgeSendAudio).toHaveBeenCalledWith(callerAudio);
+        });
+
+        const outboundFramePromise = withTimeout(
+          new Promise<Record<string, unknown>>((resolve) => {
+            ws.on("message", (data) => {
+              const parsed = JSON.parse(data.toString()) as Record<string, unknown>;
+              if (parsed.event === "media") {
+                resolve(parsed);
+              }
+            });
+          }),
+        );
+
+        callbacks?.onAudio?.(Buffer.from([9, 8, 7]));
+
+        const outboundFrame = await outboundFramePromise;
+        expect(outboundFrame).toMatchObject({
+          event: "media",
+          streamSid: "MZ-sim",
+          media: { payload: Buffer.from([9, 8, 7]).toString("base64") },
+        });
+        expect(callRecord.metadata?.realtimeDiagnostics).toMatchObject({
+          connectedEventSeen: true,
+          inboundMediaFrames: 1,
+          inboundMediaBytes: callerAudio.length,
+          outboundMediaFrames: 1,
+          outboundMediaBytes: 3,
+          openaiReady: true,
+        });
       } finally {
         if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
           ws.close();

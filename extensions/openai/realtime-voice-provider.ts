@@ -66,6 +66,24 @@ type OpenAIRealtimeVoiceBridgeConfig = RealtimeVoiceBridgeCreateRequest & {
 };
 
 const OPENAI_REALTIME_DEFAULT_MODEL = "gpt-realtime-1.5";
+const VOICE_BRIDGE_LOG_PREFIX = "[voice-bridge]";
+
+function logInfo(event: string, details: Record<string, unknown> = {}): void {
+  console.info(`${VOICE_BRIDGE_LOG_PREFIX} ${JSON.stringify({ event, ...details })}`);
+}
+
+function logError(event: string, details: Record<string, unknown> = {}): void {
+  console.error(`${VOICE_BRIDGE_LOG_PREFIX} ${JSON.stringify({ event, ...details })}`);
+}
+
+function sanitizeCloseReason(reason: Buffer, maxChars = 120): string {
+  const text = reason
+    .toString("utf8")
+    .replace(/\p{Cc}/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
+}
 
 type RealtimeEvent = {
   type: string;
@@ -137,11 +155,15 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private reconnectAttempts = 0;
   private pendingAudio: Buffer[] = [];
   private pendingGreetingInstructions: string | undefined;
+  private pendingGreetingTrigger: string | undefined;
   private markQueue: string[] = [];
   private responseStartTimestamp: number | null = null;
   private latestMediaTimestamp = 0;
   private lastAssistantItemId: string | null = null;
   private toolCallBuffers = new Map<string, { name: string; callId: string; args: string }>();
+  private outboundAudioDeltas = 0;
+  private outboundAudioBytes = 0;
+  private inboundAudioAppends = 0;
   private readonly flowId = randomUUID();
   private sessionReadyFired = false;
   private readonly audioFormat: RealtimeVoiceAudioFormat;
@@ -162,6 +184,13 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
         this.pendingAudio.push(audio);
       }
       return;
+    }
+    this.inboundAudioAppends += 1;
+    if (this.inboundAudioAppends === 1 || this.inboundAudioAppends % 50 === 0) {
+      logInfo("openai.input_audio.append", {
+        flowId: this.flowId,
+        frames: this.inboundAudioAppends,
+      });
     }
     this.sendEvent({
       type: "input_audio_buffer.append",
@@ -185,13 +214,25 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.sendEvent({ type: "response.create" });
   }
 
-  triggerGreeting(instructions?: string): void {
+  triggerGreeting(instructions?: string, trigger = "immediate-on-open"): void {
     const greetingInstructions = instructions ?? this.config.instructions;
     if (!this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       this.pendingGreetingInstructions = greetingInstructions;
+      this.pendingGreetingTrigger = trigger;
+      logInfo("openai.boot_response.queued", {
+        flowId: this.flowId,
+        trigger,
+        instructionsPresent: Boolean(greetingInstructions?.trim()),
+      });
       return;
     }
     this.pendingGreetingInstructions = undefined;
+    this.pendingGreetingTrigger = undefined;
+    logInfo("openai.boot_response.create", {
+      flowId: this.flowId,
+      trigger,
+      instructionsPresent: Boolean(greetingInstructions?.trim()),
+    });
     this.sendEvent({
       type: "response.create",
       response: {
@@ -276,6 +317,10 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
       this.ws.on("open", () => {
         this.connected = true;
         this.sessionConfigured = false;
+        logInfo("openai.ws.open", {
+          flowId: this.flowId,
+          outputAudioFormat: this.resolveRealtimeAudioFormat(),
+        });
         this.reconnectAttempts = 0;
         captureWsEvent({
           url,
@@ -306,7 +351,10 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
         try {
           this.handleEvent(JSON.parse(data.toString()) as RealtimeEvent);
         } catch (error) {
-          console.error("[openai] realtime event parse failed:", error);
+          logError("openai.event_parse_failed", {
+            flowId: this.flowId,
+            message: error instanceof Error ? error.message : String(error),
+          });
         }
       });
 
@@ -322,10 +370,15 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
             capability: "realtime-voice",
           },
         });
+        const normalizedError = error instanceof Error ? error : new Error(String(error));
+        logError("openai.ws.error", {
+          flowId: this.flowId,
+          message: normalizedError.message,
+        });
         if (!this.connected) {
-          settleReject(error instanceof Error ? error : new Error(String(error)));
+          settleReject(normalizedError);
         }
-        this.config.onError?.(error instanceof Error ? error : new Error(String(error)));
+        this.config.onError?.(normalizedError);
       });
 
       this.ws.on("close", (code, reasonBuffer) => {
@@ -335,6 +388,14 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
           capability: "realtime-voice",
           code,
           reasonBuffer,
+        });
+        logInfo("openai.ws.close", {
+          flowId: this.flowId,
+          code,
+          reason: sanitizeCloseReason(reasonBuffer),
+          outboundAudioDeltas: this.outboundAudioDeltas,
+          outboundAudioBytes: this.outboundAudioBytes,
+          inputAppends: this.inboundAudioAppends,
         });
         this.connected = false;
         this.sessionConfigured = false;
@@ -348,7 +409,10 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
     });
   }
 
-  private resolveConnectionParams(): { url: string; headers: Record<string, string> } {
+  private resolveConnectionParams(): {
+    url: string;
+    headers: Record<string, string>;
+  } {
     const cfg = this.config;
     if (cfg.azureEndpoint && cfg.azureDeployment) {
       const base = cfg.azureEndpoint
@@ -448,15 +512,20 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private handleEvent(event: RealtimeEvent): void {
     switch (event.type) {
       case "session.created":
+        logInfo("openai.session.created", { flowId: this.flowId });
         return;
 
       case "session.updated":
+        logInfo("openai.session.updated", { flowId: this.flowId });
         this.sessionConfigured = true;
         for (const chunk of this.pendingAudio.splice(0)) {
           this.sendAudio(chunk);
         }
         if (this.pendingGreetingInstructions !== undefined) {
-          this.triggerGreeting(this.pendingGreetingInstructions);
+          this.triggerGreeting(
+            this.pendingGreetingInstructions,
+            this.pendingGreetingTrigger ?? "session.updated",
+          );
         }
         if (!this.sessionReadyFired) {
           this.sessionReadyFired = true;
@@ -464,11 +533,32 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
         }
         return;
 
+      case "response.created":
+        logInfo("openai.response.created", { flowId: this.flowId });
+        return;
+
+      case "response.done":
+        logInfo("openai.response.done", {
+          flowId: this.flowId,
+          outboundAudioDeltas: this.outboundAudioDeltas,
+          outboundAudioBytes: this.outboundAudioBytes,
+        });
+        return;
+
       case "response.audio.delta": {
         if (!event.delta) {
           return;
         }
         const audio = base64ToBuffer(event.delta);
+        this.outboundAudioDeltas += 1;
+        this.outboundAudioBytes += audio.length;
+        if (this.outboundAudioDeltas === 1 || this.outboundAudioDeltas % 50 === 0) {
+          logInfo("openai.response.audio.delta", {
+            flowId: this.flowId,
+            deltas: this.outboundAudioDeltas,
+            bytes: this.outboundAudioBytes,
+          });
+        }
         this.config.onAudio(audio);
         if (this.responseStartTimestamp === null) {
           this.responseStartTimestamp = this.latestMediaTimestamp;
@@ -548,6 +638,10 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
 
       case "error": {
         const detail = readRealtimeErrorDetail(event.error);
+        logError("openai.error_event", {
+          flowId: this.flowId,
+          detail,
+        });
         this.config.onError?.(new Error(detail));
         return;
       }

@@ -6,6 +6,8 @@ import {
   buildRealtimeVoiceAgentConsultWorkingResponse,
   createRealtimeVoiceBridgeSession,
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+  REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
+  type RealtimeVoiceAudioFormat,
   type RealtimeVoiceBridgeSession,
   type RealtimeVoiceProviderConfig,
   type RealtimeVoiceProviderPlugin,
@@ -22,6 +24,24 @@ export type ToolHandlerFn = (args: unknown, callId: string) => Promise<unknown>;
 const STREAM_TOKEN_TTL_MS = 30_000;
 const DEFAULT_HOST = "localhost:8443";
 const MAX_REALTIME_MESSAGE_BYTES = 256 * 1024;
+const VOICE_BRIDGE_LOG_PREFIX = "[voice-bridge]";
+const TWILIO_EXPECTED_MEDIA_FORMAT = {
+  encoding: "audio/x-mulaw",
+  sampleRate: 8000,
+  channels: 1,
+};
+
+function logInfo(event: string, details: Record<string, unknown> = {}): void {
+  console.info(`${VOICE_BRIDGE_LOG_PREFIX} ${JSON.stringify({ event, ...details })}`);
+}
+
+function logWarn(event: string, details: Record<string, unknown> = {}): void {
+  console.warn(`${VOICE_BRIDGE_LOG_PREFIX} ${JSON.stringify({ event, ...details })}`);
+}
+
+function logError(event: string, details: Record<string, unknown> = {}): void {
+  console.error(`${VOICE_BRIDGE_LOG_PREFIX} ${JSON.stringify({ event, ...details })}`);
+}
 
 function normalizePath(pathname: string): string {
   const trimmed = pathname.trim();
@@ -50,16 +70,116 @@ function buildGreetingInstructions(
     : `${intro} "${trimmedGreeting}"`;
 }
 
+function sanitizeCloseReason(reason: Buffer, maxChars = 120): string {
+  const text = reason
+    .toString("utf8")
+    .replace(/\p{Cc}/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
+}
+
+function pickRealtimeHeaders(headers: http.IncomingHttpHeaders): Record<string, unknown> {
+  return {
+    host: headers.host,
+    upgrade: headers.upgrade,
+    connection: headers.connection,
+    userAgent: headers["user-agent"],
+    xForwardedFor: headers["x-forwarded-for"],
+    xTwilioSignaturePresent: Boolean(headers["x-twilio-signature"]),
+    secWebSocketProtocol: headers["sec-websocket-protocol"],
+  };
+}
+
+function describeRealtimeAudioFormat(format: RealtimeVoiceAudioFormat): Record<string, unknown> {
+  return {
+    encoding: format.encoding,
+    sampleRateHz: format.sampleRateHz,
+    channels: format.channels,
+  };
+}
+
+function readMediaFormatField(mediaFormat: unknown, key: string): unknown {
+  return mediaFormat && typeof mediaFormat === "object"
+    ? (mediaFormat as Record<string, unknown>)[key]
+    : undefined;
+}
+
+function isTwilioMulaw8k(mediaFormat: unknown): boolean {
+  const encoding = String(readMediaFormatField(mediaFormat, "encoding") ?? "").toLowerCase();
+  const sampleRate = Number(readMediaFormatField(mediaFormat, "sampleRate"));
+  const channels = Number(readMediaFormatField(mediaFormat, "channels") ?? 1);
+  return (
+    (encoding === "audio/x-mulaw" ||
+      encoding === "mulaw" ||
+      encoding === "g711_ulaw" ||
+      encoding === "g711-ulaw") &&
+    sampleRate === TWILIO_EXPECTED_MEDIA_FORMAT.sampleRate &&
+    channels === TWILIO_EXPECTED_MEDIA_FORMAT.channels
+  );
+}
+
+function providerFormatMatchesTwilio(format: RealtimeVoiceAudioFormat): boolean {
+  return format.encoding === "g711_ulaw" && format.sampleRateHz === 8000 && format.channels === 1;
+}
+
+function summarizeDiagnostics(diagnostics: RealtimeStreamDiagnostics): Record<string, unknown> {
+  return {
+    streamSid: diagnostics.streamSid,
+    callSid: diagnostics.callSid,
+    mediaFormat: diagnostics.mediaFormat,
+    connectedEventSeen: diagnostics.connectedEventSeen,
+    inboundMediaFrames: diagnostics.inboundMediaFrames,
+    inboundMediaBytes: diagnostics.inboundMediaBytes,
+    outboundMediaFrames: diagnostics.outboundMediaFrames,
+    outboundMediaBytes: diagnostics.outboundMediaBytes,
+    marksSent: diagnostics.marksSent,
+    marksAcked: diagnostics.marksAcked,
+    clearEventsSent: diagnostics.clearEventsSent,
+    assistantFinalTranscripts: diagnostics.assistantFinalTranscripts,
+    userFinalTranscripts: diagnostics.userFinalTranscripts,
+    openaiReady: diagnostics.openaiReady,
+    lastEvent: diagnostics.lastEvent,
+    closeCode: diagnostics.closeCode,
+    closeReason: diagnostics.closeReason,
+    durationMs: Date.now() - diagnostics.startedAt,
+  };
+}
+
 type PendingStreamToken = {
   expiry: number;
   from?: string;
   to?: string;
   direction?: "inbound" | "outbound";
+  callSid?: string;
 };
 
 type CallRegistration = {
   callId: string;
+  callRecord: CallRecord;
   initialGreetingInstructions?: string;
+};
+
+type RealtimeStreamDiagnostics = {
+  streamSid: string;
+  callSid: string;
+  mediaFormat?: unknown;
+  startedAt: number;
+  connectedEventSeen: boolean;
+  inboundMediaFrames: number;
+  inboundMediaBytes: number;
+  outboundMediaFrames: number;
+  outboundMediaBytes: number;
+  marksSent: number;
+  marksAcked: number;
+  clearEventsSent: number;
+  assistantFinalTranscripts: number;
+  userFinalTranscripts: number;
+  openaiReady: boolean;
+  lastEvent?: string;
+  closeCode?: number;
+  closeReason?: string;
+  noOutboundMediaTimer?: ReturnType<typeof setTimeout>;
 };
 
 type ActiveRealtimeVoiceBridge = RealtimeVoiceBridgeSession;
@@ -104,7 +224,9 @@ export class RealtimeCallHandler {
       from: params?.get("From") ?? undefined,
       to: params?.get("To") ?? undefined,
       direction: rawDirection?.startsWith("outbound") ? "outbound" : "inbound",
+      callSid: params?.get("CallSid") ?? undefined,
     });
+    const callSid = params?.get("CallSid") ?? "unknown";
     const wsUrl = `wss://${host}${this.getStreamPathPattern()}/${token}`;
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -112,6 +234,19 @@ export class RealtimeCallHandler {
     <Stream url="${wsUrl}" />
   </Connect>
 </Response>`;
+    logInfo("twiml.generated", {
+      callSid,
+      direction: rawDirection ?? "unknown",
+      streamUrl: wsUrl,
+      twiml,
+    });
+    if (twiml.includes("<Start>") || twiml.includes("<Start ")) {
+      logWarn("twiml.wrong_shape_start_stream", {
+        callSid,
+        streamUrl: wsUrl,
+        twiml,
+      });
+    }
     return {
       statusCode: 200,
       headers: { "Content-Type": "text/xml" },
@@ -124,6 +259,7 @@ export class RealtimeCallHandler {
     const token = url.pathname.split("/").pop() ?? null;
     const callerMeta = token ? this.consumeStreamToken(token) : null;
     if (!callerMeta) {
+      logWarn("twilio_ws.rejected", { path: url.pathname });
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
@@ -137,10 +273,35 @@ export class RealtimeCallHandler {
     wss.handleUpgrade(request, socket, head, (ws) => {
       let bridge: ActiveRealtimeVoiceBridge | null = null;
       let initialized = false;
+      let diagnostics: RealtimeStreamDiagnostics | null = null;
+      let connectedEventSeen = false;
+      logInfo("twilio_ws.open", {
+        callSid: callerMeta.callSid ?? "unknown",
+        direction: callerMeta.direction ?? "unknown",
+        remoteAddress: request.socket.remoteAddress,
+        headers: pickRealtimeHeaders(request.headers),
+      });
 
       ws.on("message", (data: Buffer) => {
         try {
           const msg = JSON.parse(data.toString()) as Record<string, unknown>;
+          const eventName = typeof msg.event === "string" ? msg.event : "unknown";
+          if (diagnostics) {
+            diagnostics.lastEvent = eventName;
+          }
+          if (eventName !== "media") {
+            logInfo("twilio_ws.event", {
+              callSid: diagnostics?.callSid ?? callerMeta.callSid ?? "unknown",
+              eventType: eventName,
+            });
+          }
+          if (!initialized && msg.event === "connected") {
+            connectedEventSeen = true;
+            logInfo("twilio_stream.connected", {
+              callSid: callerMeta.callSid ?? "unknown",
+            });
+            return;
+          }
           if (!initialized && msg.event === "start") {
             initialized = true;
             const startData =
@@ -150,7 +311,58 @@ export class RealtimeCallHandler {
             const streamSid =
               typeof startData?.streamSid === "string" ? startData.streamSid : "unknown";
             const callSid = typeof startData?.callSid === "string" ? startData.callSid : "unknown";
-            const nextBridge = this.handleCall(streamSid, callSid, ws, callerMeta);
+            diagnostics = {
+              streamSid,
+              callSid,
+              mediaFormat: startData?.mediaFormat,
+              startedAt: Date.now(),
+              connectedEventSeen,
+              inboundMediaFrames: 0,
+              inboundMediaBytes: 0,
+              outboundMediaFrames: 0,
+              outboundMediaBytes: 0,
+              marksSent: 0,
+              marksAcked: 0,
+              clearEventsSent: 0,
+              assistantFinalTranscripts: 0,
+              userFinalTranscripts: 0,
+              openaiReady: false,
+              lastEvent: "start",
+            };
+            const outboundAudioFormat = REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ;
+            logInfo("twilio_stream.start", {
+              callSid,
+              streamSid,
+              mediaFormat: startData?.mediaFormat ?? null,
+              providerOutputAudioFormat: describeRealtimeAudioFormat(outboundAudioFormat),
+            });
+            if (!isTwilioMulaw8k(startData?.mediaFormat)) {
+              logWarn("audio_format.twilio_unexpected", {
+                callSid,
+                streamSid,
+                expected: TWILIO_EXPECTED_MEDIA_FORMAT,
+                actual: startData?.mediaFormat ?? null,
+              });
+            }
+            if (!providerFormatMatchesTwilio(outboundAudioFormat)) {
+              logWarn("audio_format.provider_twilio_mismatch", {
+                callSid,
+                streamSid,
+                twilioMediaFormat: startData?.mediaFormat ?? null,
+                providerOutputAudioFormat: describeRealtimeAudioFormat(outboundAudioFormat),
+              });
+            }
+            diagnostics.noOutboundMediaTimer = setTimeout(() => {
+              if (diagnostics && diagnostics.outboundMediaFrames === 0) {
+                logWarn("twilio_stream.no_outbound_media_after_5s", {
+                  callSid,
+                  streamSid,
+                  inboundMediaFrames: diagnostics.inboundMediaFrames,
+                  openaiReady: diagnostics.openaiReady,
+                });
+              }
+            }, 5_000);
+            const nextBridge = this.handleCall(streamSid, callSid, ws, callerMeta, diagnostics);
             if (!nextBridge) {
               return;
             }
@@ -165,7 +377,23 @@ export class RealtimeCallHandler {
               ? (msg.media as Record<string, unknown>)
               : undefined;
           if (msg.event === "media" && typeof mediaData?.payload === "string") {
-            bridge.sendAudio(Buffer.from(mediaData.payload, "base64"));
+            const audio = Buffer.from(mediaData.payload, "base64");
+            if (diagnostics) {
+              diagnostics.inboundMediaFrames += 1;
+              diagnostics.inboundMediaBytes += audio.length;
+              if (
+                diagnostics.inboundMediaFrames === 1 ||
+                diagnostics.inboundMediaFrames % 50 === 0
+              ) {
+                logInfo("twilio_stream.media.inbound", {
+                  callSid: diagnostics.callSid,
+                  streamSid: diagnostics.streamSid,
+                  frames: diagnostics.inboundMediaFrames,
+                  bytes: diagnostics.inboundMediaBytes,
+                });
+              }
+            }
+            bridge.sendAudio(audio);
             if (typeof mediaData.timestamp === "number") {
               bridge.setMediaTimestamp(mediaData.timestamp);
             } else if (typeof mediaData.timestamp === "string") {
@@ -174,23 +402,62 @@ export class RealtimeCallHandler {
             return;
           }
           if (msg.event === "mark") {
+            if (diagnostics) {
+              diagnostics.marksAcked += 1;
+              logInfo("twilio_stream.mark", {
+                callSid: diagnostics.callSid,
+                streamSid: diagnostics.streamSid,
+                marksAcked: diagnostics.marksAcked,
+              });
+            }
             bridge.acknowledgeMark();
             return;
           }
           if (msg.event === "stop") {
+            logInfo("twilio_stream.stop", {
+              callSid: diagnostics?.callSid ?? callerMeta.callSid ?? "unknown",
+              streamSid: diagnostics?.streamSid ?? "unknown",
+            });
             bridge.close();
           }
         } catch (error) {
-          console.error("[voice-call] realtime WS parse failed:", error);
+          logError("twilio_ws.parse_failed", {
+            message: formatErrorMessage(error),
+          });
         }
       });
 
-      ws.on("close", () => {
+      ws.on("close", (code, reason) => {
+        if (diagnostics) {
+          if (diagnostics.noOutboundMediaTimer) {
+            clearTimeout(diagnostics.noOutboundMediaTimer);
+            diagnostics.noOutboundMediaTimer = undefined;
+          }
+          diagnostics.closeCode = code;
+          diagnostics.closeReason = Buffer.isBuffer(reason)
+            ? sanitizeCloseReason(reason)
+            : String(reason || "");
+          logInfo("twilio_ws.close_summary", {
+            callSid: diagnostics.callSid,
+            code,
+            reason: diagnostics.closeReason,
+            summary: summarizeDiagnostics(diagnostics),
+          });
+          if (diagnostics.outboundMediaFrames === 0) {
+            logWarn("twilio_ws.no_outbound_bot_audio", {
+              callSid: diagnostics.callSid,
+              inboundFrames: diagnostics.inboundMediaFrames,
+              openaiReady: diagnostics.openaiReady,
+            });
+          }
+        } else {
+          logInfo("twilio_ws.close_before_start", { code });
+        }
         bridge?.close();
       });
 
       ws.on("error", (error) => {
-        console.error("[voice-call] realtime WS error:", error);
+        logError("twilio_ws.error", { message: formatErrorMessage(error) });
       });
     });
   }
@@ -201,7 +468,10 @@ export class RealtimeCallHandler {
 
   private issueStreamToken(meta: Omit<PendingStreamToken, "expiry"> = {}): string {
     const token = randomUUID();
-    this.pendingStreamTokens.set(token, { expiry: Date.now() + STREAM_TOKEN_TTL_MS, ...meta });
+    this.pendingStreamTokens.set(token, {
+      expiry: Date.now() + STREAM_TOKEN_TTL_MS,
+      ...meta,
+    });
     for (const [candidate, entry] of this.pendingStreamTokens) {
       if (Date.now() > entry.expiry) {
         this.pendingStreamTokens.delete(candidate);
@@ -223,6 +493,7 @@ export class RealtimeCallHandler {
       from: entry.from,
       to: entry.to,
       direction: entry.direction,
+      callSid: entry.callSid,
     };
   }
 
@@ -231,6 +502,7 @@ export class RealtimeCallHandler {
     callSid: string,
     ws: WebSocket,
     callerMeta: Omit<PendingStreamToken, "expiry">,
+    diagnostics: RealtimeStreamDiagnostics,
   ): ActiveRealtimeVoiceBridge | null {
     const registration = this.registerCallInManager(callSid, callerMeta);
     if (!registration) {
@@ -238,7 +510,17 @@ export class RealtimeCallHandler {
       return null;
     }
 
-    const { callId, initialGreetingInstructions } = registration;
+    const { callId, callRecord, initialGreetingInstructions } = registration;
+    callRecord.metadata = {
+      ...(callRecord.metadata ?? {}),
+      realtimeDiagnostics: summarizeDiagnostics(diagnostics),
+    };
+    const updateDiagnostics = () => {
+      callRecord.metadata = {
+        ...(callRecord.metadata ?? {}),
+        realtimeDiagnostics: summarizeDiagnostics(diagnostics),
+      };
+    };
     const hasInitialGreeting = Boolean(initialGreetingInstructions?.trim());
     let callEndEmitted = false;
     const emitCallEnd = (reason: "completed" | "error") => {
@@ -252,6 +534,7 @@ export class RealtimeCallHandler {
     const bridge = createRealtimeVoiceBridgeSession({
       provider: this.realtimeProvider,
       providerConfig: this.providerConfig,
+      audioFormat: REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
       instructions: this.config.instructions,
       tools: this.config.tools,
       initialGreetingInstructions,
@@ -259,6 +542,24 @@ export class RealtimeCallHandler {
       audioSink: {
         isOpen: () => ws.readyState === WebSocket.OPEN,
         sendAudio: (muLaw) => {
+          diagnostics.outboundMediaFrames += 1;
+          diagnostics.outboundMediaBytes += muLaw.length;
+          if (diagnostics.outboundMediaFrames === 1 && diagnostics.noOutboundMediaTimer) {
+            clearTimeout(diagnostics.noOutboundMediaTimer);
+            diagnostics.noOutboundMediaTimer = undefined;
+          }
+          updateDiagnostics();
+          if (diagnostics.outboundMediaFrames === 1 || diagnostics.outboundMediaFrames % 50 === 0) {
+            logInfo("twilio_stream.media.outbound", {
+              callSid,
+              streamSid,
+              frames: diagnostics.outboundMediaFrames,
+              bytes: diagnostics.outboundMediaBytes,
+              ...(diagnostics.outboundMediaFrames === 1
+                ? { latencyFromStartMs: Date.now() - diagnostics.startedAt }
+                : {}),
+            });
+          }
           ws.send(
             JSON.stringify({
               event: "media",
@@ -268,10 +569,20 @@ export class RealtimeCallHandler {
           );
         },
         clearAudio: () => {
+          diagnostics.clearEventsSent += 1;
+          updateDiagnostics();
           ws.send(JSON.stringify({ event: "clear", streamSid }));
         },
         sendMark: (markName) => {
-          ws.send(JSON.stringify({ event: "mark", streamSid, mark: { name: markName } }));
+          diagnostics.marksSent += 1;
+          updateDiagnostics();
+          ws.send(
+            JSON.stringify({
+              event: "mark",
+              streamSid,
+              mark: { name: markName },
+            }),
+          );
         },
       },
       onTranscript: (role, text, isFinal) => {
@@ -279,6 +590,8 @@ export class RealtimeCallHandler {
           return;
         }
         if (role === "user") {
+          diagnostics.userFinalTranscripts += 1;
+          updateDiagnostics();
           const event: NormalizedEvent = {
             id: `realtime-speech-${callSid}-${Date.now()}`,
             type: "call.speech",
@@ -291,6 +604,8 @@ export class RealtimeCallHandler {
           this.manager.processEvent(event);
           return;
         }
+        diagnostics.assistantFinalTranscripts += 1;
+        updateDiagnostics();
         this.manager.processEvent({
           id: `realtime-bot-${callSid}-${Date.now()}`,
           type: "call.speaking",
@@ -310,12 +625,19 @@ export class RealtimeCallHandler {
         );
       },
       onReady: () => {
-        console.log(
-          `[voice-call] realtime opening turn requested: callId=${callId} providerCallId=${callSid} reasonPresent=${hasInitialGreeting}`,
-        );
+        diagnostics.openaiReady = true;
+        updateDiagnostics();
+        logInfo("opening_turn.requested", {
+          callId,
+          providerCallId: callSid,
+          reasonPresent: hasInitialGreeting,
+        });
       },
       onError: (error) => {
-        console.error("[voice-call] realtime voice error:", error.message);
+        logError("realtime_voice.error", {
+          callSid,
+          message: error.message,
+        });
       },
       onClose: (reason) => {
         if (reason !== "error") {
@@ -329,16 +651,21 @@ export class RealtimeCallHandler {
           .hangupCall({ callId, providerCallId: callSid, reason: "error" })
           .catch((error: unknown) => {
             console.warn(
-              `[voice-call] Failed to hang up realtime call ${callSid}: ${formatErrorMessage(
-                error,
-              )}`,
+              `${VOICE_BRIDGE_LOG_PREFIX} ${JSON.stringify({
+                event: "realtime_voice.hangup_failed",
+                callSid,
+                message: formatErrorMessage(error),
+              })}`,
             );
           });
       },
     });
 
     bridge.connect().catch((error: Error) => {
-      console.error("[voice-call] Failed to connect realtime bridge:", error);
+      logError("realtime_voice.connect_failed", {
+        callSid,
+        message: error.message,
+      });
       bridge.close();
       emitCallEnd("error");
       ws.close(1011, "Failed to connect");
@@ -387,6 +714,7 @@ export class RealtimeCallHandler {
 
     return {
       callId: callRecord.callId,
+      callRecord,
       initialGreetingInstructions: buildGreetingInstructions(
         this.config.instructions,
         initialGreeting,

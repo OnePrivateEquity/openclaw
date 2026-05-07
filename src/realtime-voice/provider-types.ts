@@ -152,7 +152,7 @@ export type RealtimeVoiceBridge = {
   sendAudio(audio: Buffer): void;
   setMediaTimestamp(ts: number): void;
   sendUserMessage?(text: string): void;
-  triggerGreeting?(instructions?: string): void;
+  triggerGreeting?(instructions?: string, trigger?: string): void;
   submitToolResult(callId: string, result: unknown, options?: RealtimeVoiceToolResultOptions): void;
   acknowledgeMark(): void;
   close(): void;
