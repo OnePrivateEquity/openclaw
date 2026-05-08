@@ -70,6 +70,23 @@ function buildGreetingInstructions(
     : `${intro} "${trimmedGreeting}"`;
 }
 
+function buildCallScopedSessionInstructions(
+  baseInstructions: string | undefined,
+  greeting: string | undefined,
+): string | undefined {
+  const trimmedGreeting = greeting?.trim();
+  if (!trimmedGreeting) {
+    return baseInstructions;
+  }
+  const sessionIdentity = [
+    "This live phone call has a call-scoped boot packet. Treat it as durable context for the entire realtime session, not only the first turn.",
+    `Boot reason / opening identity: "${trimmedGreeting}"`,
+    "Continue as the same agent implied by that opening. If the opening identifies you by name, keep that identity throughout the call.",
+    "If the caller asks who this is or why you called, answer directly from the boot reason/opening identity. Do not fall back to a generic assistant identity or say Nathan asked you to call unless the boot reason says that.",
+  ].join("\n");
+  return baseInstructions ? `${baseInstructions}\n\n${sessionIdentity}` : sessionIdentity;
+}
+
 function readMetadataString(call: CallRecord, key: string): string | undefined {
   const value = call.metadata?.[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -239,6 +256,7 @@ type CallRegistration = {
   callId: string;
   callRecord: CallRecord;
   initialGreetingInstructions?: string;
+  sessionInstructions?: string;
 };
 
 type RealtimeStreamDiagnostics = {
@@ -591,7 +609,7 @@ export class RealtimeCallHandler {
       return null;
     }
 
-    const { callId, callRecord, initialGreetingInstructions } = registration;
+    const { callId, callRecord, initialGreetingInstructions, sessionInstructions } = registration;
     callRecord.metadata = {
       ...(callRecord.metadata ?? {}),
       realtimeDiagnostics: summarizeDiagnostics(diagnostics),
@@ -616,7 +634,7 @@ export class RealtimeCallHandler {
       provider: this.realtimeProvider,
       providerConfig: this.providerConfig,
       audioFormat: REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
-      instructions: this.config.instructions,
+      instructions: sessionInstructions ?? this.config.instructions,
       tools: this.config.tools,
       initialGreetingInstructions,
       triggerGreetingOnReady: true,
@@ -825,6 +843,10 @@ export class RealtimeCallHandler {
       callId: callRecord.callId,
       callRecord,
       initialGreetingInstructions: buildGreetingInstructions(
+        this.config.instructions,
+        initialGreeting,
+      ),
+      sessionInstructions: buildCallScopedSessionInstructions(
         this.config.instructions,
         initialGreeting,
       ),

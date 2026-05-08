@@ -346,6 +346,7 @@ describe("RealtimeCallHandler websocket hardening", () => {
   it("passes outbound initial messages as deterministic realtime opening instructions", async () => {
     const triggerGreeting = vi.fn();
     let onReady: (() => void) | undefined;
+    let bridgeRequest: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0] | undefined;
     const callRecord: CallRecord = {
       callId: "call-outbound",
       providerCallId: "CA-outbound",
@@ -368,6 +369,7 @@ describe("RealtimeCallHandler websocket hardening", () => {
         getCallByProviderCallId: vi.fn(() => callRecord),
       },
       realtimeProvider: makeRealtimeProvider((req) => {
+        bridgeRequest = req;
         onReady = req.onReady;
         return {
           ...makeBridge(),
@@ -398,6 +400,10 @@ describe("RealtimeCallHandler websocket hardening", () => {
         expect(instructions).toContain("first spoken response MUST identify yourself");
         expect(instructions).toContain('Do not open with "How can I help you?"');
         expect(instructions).toContain("same-mind voice fix");
+        expect(bridgeRequest?.instructions).toContain("call-scoped boot packet");
+        expect(bridgeRequest?.instructions).toContain("Boot reason / opening identity");
+        expect(bridgeRequest?.instructions).toContain("same-mind voice fix");
+        expect(bridgeRequest?.instructions).toContain("If the caller asks who this is");
         expect(callRecord.metadata?.initialMessage).toBeUndefined();
         expect(callRecord.metadata?.realtimeBootReason).toContain("same-mind voice fix");
       } finally {
@@ -479,7 +485,9 @@ describe("RealtimeCallHandler websocket hardening", () => {
         await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
         const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
         expect(url).toBe("https://foresight.test/api/v2/internal/voice/events");
-        expect(init.headers).toMatchObject({ authorization: "Bearer secret-token" });
+        expect(init.headers).toMatchObject({
+          authorization: "Bearer secret-token",
+        });
         const body = JSON.parse(String(init.body));
         expect(body.eventType).toBe("voice.boot.first_utterance.spoken");
         expect(body.voiceSessionId).toBe("vsn_first");
