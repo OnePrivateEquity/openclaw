@@ -287,6 +287,8 @@ export type OutboundCallOptions = {
   mode?: CallMode;
   /** DTMF digits to send after the call is connected */
   dtmfSequence?: string;
+  /** Opaque caller/runtime metadata persisted with the call record. */
+  metadata?: Record<string, unknown>;
 };
 
 // -----------------------------------------------------------------------------

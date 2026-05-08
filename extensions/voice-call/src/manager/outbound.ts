@@ -153,6 +153,7 @@ export async function initiateCall(
     transcript: [],
     processedEventIds: [],
     metadata: {
+      ...(opts.metadata ?? {}),
       ...(initialMessage && { initialMessage }),
       mode,
     },

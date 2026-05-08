@@ -159,6 +159,39 @@ function asParamRecord(params: unknown): Record<string, unknown> {
     : {};
 }
 
+function normalizeOptionalRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function buildForesightCallMetadata(
+  params: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const metadata: Record<string, unknown> = {};
+  const stringFields = [
+    "foresightVoiceSessionId",
+    "foresightTraceId",
+    "foresightCallReason",
+    "foresightRequiredFirstUtterance",
+    "foresightSessionEndUrl",
+    "foresightSessionEndToken",
+    "foresightVoiceEventsUrl",
+    "foresightVoiceEventsToken",
+  ];
+  for (const field of stringFields) {
+    const value = normalizeOptionalString(params[field]);
+    if (value) {
+      metadata[field] = value;
+    }
+  }
+  const bootPacket = normalizeOptionalRecord(params.foresightBootPacket);
+  if (bootPacket) {
+    metadata.foresightBootPacket = bootPacket;
+  }
+  return Object.keys(metadata).length ? metadata : undefined;
+}
+
 const VOICE_CALL_RUNTIME_KEY = Symbol.for("openclaw.voice-call.runtime");
 const VOICE_CALL_RUNTIME_PROMISE_KEY = Symbol.for("openclaw.voice-call.runtimePromise");
 const VOICE_CALL_RUNTIME_STOP_PROMISE_KEY = Symbol.for("openclaw.voice-call.runtimeStopPromise");
@@ -271,10 +304,12 @@ export default definePluginEntry({
       to: string;
       message?: string;
       mode?: "notify" | "conversation";
+      metadata?: Record<string, unknown>;
     }) => {
       const result = await params.rt.manager.initiateCall(params.to, undefined, {
         message: params.message,
         mode: params.mode,
+        metadata: params.metadata,
       });
       if (!result.success) {
         params.respond(false, { error: result.error || "initiate failed" });
@@ -329,6 +364,7 @@ export default definePluginEntry({
             respond(false, { error: "to required" });
             return;
           }
+          const rawParams = asParamRecord(params);
           const mode =
             params?.mode === "notify" || params?.mode === "conversation" ? params.mode : undefined;
           await initiateCallAndRespond({
@@ -337,6 +373,7 @@ export default definePluginEntry({
             to,
             message,
             mode,
+            metadata: buildForesightCallMetadata(rawParams),
           });
         } catch (err) {
           sendError(respond, err);
@@ -456,11 +493,13 @@ export default definePluginEntry({
             return;
           }
           const rt = await ensureRuntime();
+          const rawParams = asParamRecord(params);
           await initiateCallAndRespond({
             rt,
             respond,
             to,
             message: message || undefined,
+            metadata: buildForesightCallMetadata(rawParams),
           });
         } catch (err) {
           sendError(respond, err);
@@ -500,6 +539,7 @@ export default definePluginEntry({
                     rawParams.mode === "notify" || rawParams.mode === "conversation"
                       ? rawParams.mode
                       : undefined,
+                  metadata: buildForesightCallMetadata(rawParams),
                 });
                 if (!result.success) {
                   throw new Error(result.error || "initiate failed");
@@ -581,6 +621,7 @@ export default definePluginEntry({
           }
           const result = await rt.manager.initiateCall(to, undefined, {
             message: normalizeOptionalString(rawParams.message),
+            metadata: buildForesightCallMetadata(rawParams),
           });
           if (!result.success) {
             throw new Error(result.error || "initiate failed");

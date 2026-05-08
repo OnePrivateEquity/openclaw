@@ -346,7 +346,7 @@ describe("RealtimeCallHandler websocket hardening", () => {
   it("passes outbound initial messages as deterministic realtime opening instructions", async () => {
     const triggerGreeting = vi.fn();
     let onReady: (() => void) | undefined;
-    const callRecord = {
+    const callRecord: CallRecord = {
       callId: "call-outbound",
       providerCallId: "CA-outbound",
       provider: "twilio",
@@ -398,14 +398,106 @@ describe("RealtimeCallHandler websocket hardening", () => {
         expect(instructions).toContain("first spoken response MUST identify yourself");
         expect(instructions).toContain('Do not open with "How can I help you?"');
         expect(instructions).toContain("same-mind voice fix");
-        expect(callRecord.metadata.initialMessage).toBeUndefined();
-        expect(callRecord.metadata.realtimeBootReason).toContain("same-mind voice fix");
+        expect(callRecord.metadata?.initialMessage).toBeUndefined();
+        expect(callRecord.metadata?.realtimeBootReason).toContain("same-mind voice fix");
       } finally {
         if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
           ws.close();
         }
       }
     } finally {
+      await server.close();
+    }
+  });
+
+  it("emits a Foresight first-utterance event from the first final assistant transcript", async () => {
+    let callbacks: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0] | undefined;
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const callRecord: CallRecord = {
+      callId: "call-foresight-first",
+      providerCallId: "CA-first",
+      provider: "twilio",
+      direction: "outbound",
+      state: "initiated",
+      from: "+15550000000",
+      to: "+15550000001",
+      startedAt: Date.now(),
+      transcript: [],
+      processedEventIds: [],
+      metadata: {
+        initialMessage:
+          "Hi Nathan, this is Soc. I am calling to validate same-self voice boot behavior.",
+        mode: "conversation",
+        foresightVoiceSessionId: "vsn_first",
+        foresightTraceId: "vtr_first",
+        foresightRequiredFirstUtterance:
+          "Hi Nathan, this is Soc. I am calling to validate same-self voice boot behavior.",
+        foresightVoiceEventsUrl: "https://foresight.test/api/v2/internal/voice/events",
+        foresightVoiceEventsToken: "secret-token",
+        foresightBootPacket: { schemaVersion: 1, traceId: "vtr_first" },
+      },
+    };
+    const handler = makeHandler(undefined, {
+      manager: {
+        processEvent: vi.fn(),
+        getCallByProviderCallId: vi.fn(() => callRecord),
+      },
+      realtimeProvider: makeRealtimeProvider((req) => {
+        callbacks = req;
+        return makeBridge({
+          connect: async () => {
+            req.onReady?.();
+          },
+        });
+      }),
+    });
+    const server = await startRealtimeServer(handler);
+
+    try {
+      const ws = await connectWs(server.url);
+      try {
+        ws.send(
+          JSON.stringify({
+            event: "start",
+            start: {
+              streamSid: "MZ-first",
+              callSid: "CA-first",
+            },
+          }),
+        );
+
+        await vi.waitFor(() => expect(callbacks).toBeDefined());
+        callbacks?.onTranscript?.(
+          "assistant",
+          "Hi Nathan, this is Soc. I am calling to validate same-self voice boot behavior.",
+          true,
+        );
+
+        await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+        const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+        expect(url).toBe("https://foresight.test/api/v2/internal/voice/events");
+        expect(init.headers).toMatchObject({ authorization: "Bearer secret-token" });
+        const body = JSON.parse(String(init.body));
+        expect(body.eventType).toBe("voice.boot.first_utterance.spoken");
+        expect(body.voiceSessionId).toBe("vsn_first");
+        expect(body.traceId).toBe("vtr_first");
+        expect(body.payload.text).toContain("same-self voice boot");
+        expect(body.payload.matchedRequiredFirstUtterance).toBe(true);
+        expect(body.payload.bootPacket.traceId).toBe("vtr_first");
+
+        callbacks?.onTranscript?.("assistant", "Second assistant turn.", true);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally {
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      }
+    } finally {
+      vi.unstubAllGlobals();
       await server.close();
     }
   });

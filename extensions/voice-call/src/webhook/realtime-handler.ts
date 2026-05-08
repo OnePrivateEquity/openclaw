@@ -70,6 +70,87 @@ function buildGreetingInstructions(
     : `${intro} "${trimmedGreeting}"`;
 }
 
+function readMetadataString(call: CallRecord, key: string): string | undefined {
+  const value = call.metadata?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readMetadataRecord(call: CallRecord, key: string): Record<string, unknown> | undefined {
+  const value = call.metadata?.[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function normalizeComparableSpeech(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function firstUtteranceMatches(actual: string, required: string): boolean {
+  const normalizedActual = normalizeComparableSpeech(actual);
+  const normalizedRequired = normalizeComparableSpeech(required);
+  return Boolean(
+    normalizedActual &&
+    normalizedRequired &&
+    (normalizedActual.includes(normalizedRequired) ||
+      normalizedRequired.includes(normalizedActual)),
+  );
+}
+
+function sanitizeEventIdSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+}
+
+async function postForesightVoiceEvent(params: {
+  call: CallRecord;
+  eventType: string;
+  payload: Record<string, unknown>;
+  providerCallId?: string;
+}): Promise<void> {
+  const url = readMetadataString(params.call, "foresightVoiceEventsUrl");
+  const token = readMetadataString(params.call, "foresightVoiceEventsToken");
+  const voiceSessionId = readMetadataString(params.call, "foresightVoiceSessionId");
+  if (!url || !token || !voiceSessionId) {
+    return;
+  }
+
+  const traceId = readMetadataString(params.call, "foresightTraceId");
+  const occurredAt = new Date().toISOString();
+  const eventId = `openclaw_${sanitizeEventIdSegment(params.eventType)}_${sanitizeEventIdSegment(
+    voiceSessionId,
+  )}_${Date.now()}`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-foresight-timestamp": occurredAt,
+    },
+    body: JSON.stringify({
+      eventId,
+      eventType: params.eventType,
+      voiceSessionId,
+      openclawCallId: params.call.callId,
+      twilioCallSid: params.providerCallId ?? params.call.providerCallId ?? null,
+      traceId: traceId ?? null,
+      occurredAt,
+      payload: {
+        ...params.payload,
+        bootPacket: readMetadataRecord(params.call, "foresightBootPacket") ?? null,
+      },
+      source: "openclaw",
+      schemaVersion: 1,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Foresight voice event POST failed: ${response.status}`);
+  }
+}
+
 function sanitizeCloseReason(reason: Buffer, maxChars = 120): string {
   const text = reason
     .toString("utf8")
@@ -606,6 +687,16 @@ export class RealtimeCallHandler {
         }
         diagnostics.assistantFinalTranscripts += 1;
         updateDiagnostics();
+        const requiredFirstUtterance = readMetadataString(
+          callRecord,
+          "foresightRequiredFirstUtterance",
+        );
+        const shouldEmitFirstUtterance = Boolean(
+          requiredFirstUtterance && !callRecord.metadata?.foresightFirstUtteranceEventEmitted,
+        );
+        if (shouldEmitFirstUtterance && callRecord.metadata) {
+          callRecord.metadata.foresightFirstUtteranceEventEmitted = true;
+        }
         this.manager.processEvent({
           id: `realtime-bot-${callSid}-${Date.now()}`,
           type: "call.speaking",
@@ -614,6 +705,24 @@ export class RealtimeCallHandler {
           timestamp: Date.now(),
           text,
         });
+        if (shouldEmitFirstUtterance && requiredFirstUtterance) {
+          void postForesightVoiceEvent({
+            call: callRecord,
+            eventType: "voice.boot.first_utterance.spoken",
+            providerCallId: callSid,
+            payload: {
+              text,
+              requiredFirstUtterance,
+              matchedRequiredFirstUtterance: firstUtteranceMatches(text, requiredFirstUtterance),
+            },
+          }).catch((error: unknown) => {
+            logWarn("foresight_voice_event.post_failed", {
+              callSid,
+              eventType: "voice.boot.first_utterance.spoken",
+              message: formatErrorMessage(error),
+            });
+          });
+        }
       },
       onToolCall: (toolEvent, session) => {
         void this.executeToolCall(

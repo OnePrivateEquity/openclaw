@@ -149,6 +149,7 @@ describe("voice-call outbound helpers", () => {
     const result = await initiateCall(ctx as never, "+14155550123", "session-1", {
       mode: "notify",
       message: "hello there",
+      metadata: { foresightVoiceSessionId: "vsn_1", foresightTraceId: "vtr_1" },
     });
     expect(result).toEqual({
       callId: expect.any(String),
@@ -166,6 +167,12 @@ describe("voice-call outbound helpers", () => {
       inlineTwiml: "<Response />",
     });
     expect(ctx.providerCallIdMap.get("provider-1")).toBe(callId);
+    expect(ctx.activeCalls.get(callId)?.metadata).toMatchObject({
+      foresightVoiceSessionId: "vsn_1",
+      foresightTraceId: "vtr_1",
+      initialMessage: "hello there",
+      mode: "notify",
+    });
     expect(persistCallRecordMock).toHaveBeenCalledTimes(2);
   });
 

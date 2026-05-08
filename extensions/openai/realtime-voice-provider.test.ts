@@ -160,7 +160,7 @@ describe("buildOpenAIRealtimeVoiceProvider", () => {
     socket.emit("open");
     await connecting;
 
-    bridge.triggerGreeting("Open with the call reason.");
+    bridge.triggerGreeting?.("Open with the call reason.");
 
     expect(parseSent(socket).map((event) => event.type)).toEqual([
       "session.update",
