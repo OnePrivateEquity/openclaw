@@ -55,28 +55,35 @@ function normalizePath(pathname: string): string {
   return prefixed.endsWith("/") ? prefixed.slice(0, -1) : prefixed;
 }
 
+function combineInstructionBlocks(...blocks: Array<string | undefined>): string | undefined {
+  const parts = blocks.map((block) => block?.trim()).filter(Boolean) as string[];
+  return parts.length ? parts.join("\n\n") : undefined;
+}
+
 function buildGreetingInstructions(
   baseInstructions: string | undefined,
   greeting: string | undefined,
+  perCallInstructions?: string,
 ): string | undefined {
   const trimmedGreeting = greeting?.trim();
+  const base = combineInstructionBlocks(baseInstructions, perCallInstructions);
   if (!trimmedGreeting) {
-    return baseInstructions;
+    return base;
   }
   const intro =
     'You are starting a live phone call. Your first spoken response MUST identify yourself and state why you are calling. Use the following opening instruction as the actual first-turn content, not as vague background. Do not open with "How can I help you?" for an outbound call. Opening instruction:';
-  return baseInstructions
-    ? `${baseInstructions}\n\n${intro} "${trimmedGreeting}"`
-    : `${intro} "${trimmedGreeting}"`;
+  return combineInstructionBlocks(base, `${intro} "${trimmedGreeting}"`);
 }
 
 function buildCallScopedSessionInstructions(
   baseInstructions: string | undefined,
   greeting: string | undefined,
+  perCallInstructions?: string,
 ): string | undefined {
   const trimmedGreeting = greeting?.trim();
+  const base = combineInstructionBlocks(baseInstructions, perCallInstructions);
   if (!trimmedGreeting) {
-    return baseInstructions;
+    return base;
   }
   const sessionIdentity = [
     "This live phone call has a call-scoped boot packet. Treat it as durable context for the entire realtime session, not only the first turn.",
@@ -84,7 +91,7 @@ function buildCallScopedSessionInstructions(
     "Continue as the same agent implied by that opening. If the opening identifies you by name, keep that identity throughout the call.",
     "If the caller asks who this is or why you called, answer directly from the boot reason/opening identity. Do not fall back to a generic assistant identity or say Nathan asked you to call unless the boot reason says that.",
   ].join("\n");
-  return baseInstructions ? `${baseInstructions}\n\n${sessionIdentity}` : sessionIdentity;
+  return combineInstructionBlocks(base, sessionIdentity);
 }
 
 function readMetadataString(call: CallRecord, key: string): string | undefined {
@@ -970,6 +977,7 @@ export class RealtimeCallHandler {
     }
 
     const initialGreeting = this.extractInitialGreeting(callRecord);
+    const perCallInstructions = this.extractPerCallInstructions(callRecord);
     if (callRecord.metadata && initialGreeting) {
       callRecord.metadata.realtimeBootReason = initialGreeting;
       delete callRecord.metadata.initialMessage;
@@ -988,10 +996,12 @@ export class RealtimeCallHandler {
       initialGreetingInstructions: buildGreetingInstructions(
         this.config.instructions,
         initialGreeting,
+        perCallInstructions,
       ),
       sessionInstructions: buildCallScopedSessionInstructions(
         this.config.instructions,
         initialGreeting,
+        perCallInstructions,
       ),
     };
   }
@@ -1000,6 +1010,13 @@ export class RealtimeCallHandler {
     return typeof call.metadata?.initialMessage === "string"
       ? call.metadata.initialMessage
       : undefined;
+  }
+
+  private extractPerCallInstructions(call: CallRecord): string | undefined {
+    return (
+      readMetadataString(call, "foresightResponseSystemPrompt") ??
+      readMetadataString(call, "responseSystemPromptOverride")
+    );
   }
 
   private endCallInManager(callSid: string, callId: string, reason: "completed" | "error"): void {

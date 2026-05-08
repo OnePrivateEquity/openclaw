@@ -174,6 +174,8 @@ function buildForesightCallMetadata(
     "foresightTraceId",
     "foresightCallReason",
     "foresightRequiredFirstUtterance",
+    "foresightResponseSystemPrompt",
+    "responseSystemPromptOverride",
     "foresightSessionEndUrl",
     "foresightSessionEndToken",
     "foresightVoiceEventsUrl",

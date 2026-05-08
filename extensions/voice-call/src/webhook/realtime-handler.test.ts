@@ -552,6 +552,8 @@ describe("RealtimeCallHandler websocket hardening", () => {
         foresightTraceId: "vtr_first",
         foresightRequiredFirstUtterance:
           "Hi Nathan, this is Soc. I am calling to validate same-self voice boot behavior.",
+        foresightResponseSystemPrompt:
+          "You are Soc / Socrates, the same Foresight agent Nathan talks to in chat.",
         foresightVoiceEventsUrl: "https://foresight.test/api/v2/internal/voice/events",
         foresightVoiceEventsToken: "secret-token",
         foresightBootPacket: { schemaVersion: 1, traceId: "vtr_first" },
@@ -587,6 +589,9 @@ describe("RealtimeCallHandler websocket hardening", () => {
         );
 
         await vi.waitFor(() => expect(callbacks).toBeDefined());
+        expect(callbacks?.instructions).toContain(
+          "You are Soc / Socrates, the same Foresight agent Nathan talks to in chat.",
+        );
         callbacks?.onTranscript?.(
           "assistant",
           "Hi Nathan, this is Soc. I am calling to validate same-self voice boot behavior.",

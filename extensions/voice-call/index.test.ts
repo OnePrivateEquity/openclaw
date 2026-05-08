@@ -284,6 +284,39 @@ describe("voice-call plugin", () => {
     expect(payload.callId).toBe("call-1");
   });
 
+  it("preserves Foresight per-call response system prompt metadata", async () => {
+    const { methods } = setup({ provider: "mock" });
+    const handler = methods.get("voicecall.initiate") as
+      | ((ctx: {
+          params: Record<string, unknown>;
+          respond: ReturnType<typeof vi.fn>;
+        }) => Promise<void>)
+      | undefined;
+    const respond = vi.fn();
+
+    await handler?.({
+      params: {
+        message: "Hi Nathan, this is Harvey calling from Foresight.",
+        responseSystemPromptOverride: "You are Harvey, Nathan's Foresight legal operator.",
+        foresightResponseSystemPrompt: "You are Harvey, same self as Foresight chat.",
+        foresightRequiredFirstUtterance: "Hi Nathan, this is Harvey calling from Foresight.",
+      },
+      respond,
+    });
+
+    expect(runtimeStub.manager.initiateCall).toHaveBeenCalledWith(
+      "+15550001234",
+      undefined,
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          responseSystemPromptOverride: "You are Harvey, Nathan's Foresight legal operator.",
+          foresightResponseSystemPrompt: "You are Harvey, same self as Foresight chat.",
+          foresightRequiredFirstUtterance: "Hi Nathan, this is Harvey calling from Foresight.",
+        }),
+      }),
+    );
+  });
+
   it("returns call status", async () => {
     const { methods } = setup({ provider: "mock" });
     const handler = methods.get("voicecall.status") as
