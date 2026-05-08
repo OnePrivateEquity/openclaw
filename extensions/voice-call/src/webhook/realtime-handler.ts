@@ -25,6 +25,7 @@ const STREAM_TOKEN_TTL_MS = 30_000;
 const DEFAULT_HOST = "localhost:8443";
 const MAX_REALTIME_MESSAGE_BYTES = 256 * 1024;
 const VOICE_BRIDGE_LOG_PREFIX = "[voice-bridge]";
+const TWILIO_REALTIME_BOOT_PREAMBLE = "One moment while I connect the voice session.";
 const TWILIO_EXPECTED_MEDIA_FORMAT = {
   encoding: "audio/x-mulaw",
   sampleRate: 8000,
@@ -250,6 +251,7 @@ type PendingStreamToken = {
   to?: string;
   direction?: "inbound" | "outbound";
   callSid?: string;
+  preconnectedBridge?: PreparedRealtimeVoiceBridge;
 };
 
 type CallRegistration = {
@@ -279,6 +281,22 @@ type RealtimeStreamDiagnostics = {
   closeCode?: number;
   closeReason?: string;
   noOutboundMediaTimer?: ReturnType<typeof setTimeout>;
+};
+
+type TwilioStreamAttachment = {
+  ws: WebSocket;
+  streamSid: string;
+  callSid: string;
+  diagnostics: RealtimeStreamDiagnostics;
+};
+
+type PreparedRealtimeVoiceBridge = {
+  session: RealtimeVoiceBridgeSession;
+  callId: string;
+  callRecord: CallRecord;
+  attachTwilioStream(attachment: TwilioStreamAttachment): void;
+  endCall(reason: "completed" | "error"): void;
+  close(): void;
 };
 
 type ActiveRealtimeVoiceBridge = RealtimeVoiceBridgeSession;
@@ -319,16 +337,22 @@ export class RealtimeCallHandler {
   buildTwiMLPayload(req: http.IncomingMessage, params?: URLSearchParams): WebhookResponsePayload {
     const host = this.publicOrigin || req.headers.host || DEFAULT_HOST;
     const rawDirection = params?.get("Direction");
-    const token = this.issueStreamToken({
+    const callSidParam = params?.get("CallSid") ?? undefined;
+    const tokenMeta: Omit<PendingStreamToken, "expiry"> = {
       from: params?.get("From") ?? undefined,
       to: params?.get("To") ?? undefined,
       direction: rawDirection?.startsWith("outbound") ? "outbound" : "inbound",
-      callSid: params?.get("CallSid") ?? undefined,
-    });
-    const callSid = params?.get("CallSid") ?? "unknown";
+      callSid: callSidParam,
+    };
+    if (callSidParam) {
+      tokenMeta.preconnectedBridge = this.preparePreconnectedBridge(callSidParam, tokenMeta);
+    }
+    const token = this.issueStreamToken(tokenMeta);
+    const callSid = callSidParam ?? "unknown";
     const wsUrl = `wss://${host}${this.getStreamPathPattern()}/${token}`;
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+  <Say voice="alice">${TWILIO_REALTIME_BOOT_PREAMBLE}</Say>
   <Connect>
     <Stream url="${wsUrl}" />
   </Connect>
@@ -573,6 +597,7 @@ export class RealtimeCallHandler {
     });
     for (const [candidate, entry] of this.pendingStreamTokens) {
       if (Date.now() > entry.expiry) {
+        entry.preconnectedBridge?.close();
         this.pendingStreamTokens.delete(candidate);
       }
     }
@@ -586,6 +611,7 @@ export class RealtimeCallHandler {
     }
     this.pendingStreamTokens.delete(token);
     if (Date.now() > entry.expiry) {
+      entry.preconnectedBridge?.close();
       return null;
     }
     return {
@@ -593,6 +619,7 @@ export class RealtimeCallHandler {
       to: entry.to,
       direction: entry.direction,
       callSid: entry.callSid,
+      preconnectedBridge: entry.preconnectedBridge,
     };
   }
 
@@ -603,31 +630,108 @@ export class RealtimeCallHandler {
     callerMeta: Omit<PendingStreamToken, "expiry">,
     diagnostics: RealtimeStreamDiagnostics,
   ): ActiveRealtimeVoiceBridge | null {
-    const registration = this.registerCallInManager(callSid, callerMeta);
-    if (!registration) {
+    const prepared =
+      callerMeta.preconnectedBridge ?? this.prepareRealtimeBridge(callSid, callerMeta);
+    if (!prepared) {
       ws.close(1008, "Caller rejected by policy");
       return null;
     }
 
-    const { callId, callRecord, initialGreetingInstructions, sessionInstructions } = registration;
-    callRecord.metadata = {
-      ...(callRecord.metadata ?? {}),
+    prepared.callRecord.metadata = {
+      ...(prepared.callRecord.metadata ?? {}),
       realtimeDiagnostics: summarizeDiagnostics(diagnostics),
     };
+    prepared.attachTwilioStream({ ws, streamSid, callSid, diagnostics });
+    if (!callerMeta.preconnectedBridge) {
+      this.connectPreparedBridge(prepared, callSid, ws);
+    }
+    return prepared.session;
+  }
+
+  private preparePreconnectedBridge(
+    callSid: string,
+    callerMeta: Omit<PendingStreamToken, "expiry">,
+  ): PreparedRealtimeVoiceBridge | undefined {
+    const prepared = this.prepareRealtimeBridge(callSid, callerMeta);
+    if (!prepared) {
+      logWarn("realtime_voice.preconnect_skipped", { callSid, reason: "registration_failed" });
+      return undefined;
+    }
+    logInfo("realtime_voice.preconnect_started", { callSid, callId: prepared.callId });
+    this.connectPreparedBridge(prepared, callSid);
+    return prepared;
+  }
+
+  private connectPreparedBridge(
+    prepared: PreparedRealtimeVoiceBridge,
+    callSid: string,
+    ws?: WebSocket,
+  ): void {
+    prepared.session.connect().catch((error: Error) => {
+      logError("realtime_voice.connect_failed", {
+        callSid,
+        message: error.message,
+      });
+      prepared.endCall("error");
+      prepared.close();
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.close(1011, "Failed to connect");
+      }
+    });
+  }
+
+  private prepareRealtimeBridge(
+    callSid: string,
+    callerMeta: Omit<PendingStreamToken, "expiry">,
+  ): PreparedRealtimeVoiceBridge | null {
+    const registration = this.registerCallInManager(callSid, callerMeta);
+    if (!registration) {
+      return null;
+    }
+
+    const { callId, callRecord, initialGreetingInstructions, sessionInstructions } = registration;
+    const hasInitialGreeting = Boolean(initialGreetingInstructions?.trim());
+    let attachment: TwilioStreamAttachment | undefined;
+    let ready = false;
+    let connected = false;
+    let greetingTriggered = false;
+    let greetingFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+    let callEndEmitted = false;
+
     const updateDiagnostics = () => {
+      if (!attachment) {
+        return;
+      }
       callRecord.metadata = {
         ...(callRecord.metadata ?? {}),
-        realtimeDiagnostics: summarizeDiagnostics(diagnostics),
+        realtimeDiagnostics: summarizeDiagnostics(attachment.diagnostics),
       };
     };
-    const hasInitialGreeting = Boolean(initialGreetingInstructions?.trim());
-    let callEndEmitted = false;
     const emitCallEnd = (reason: "completed" | "error") => {
       if (callEndEmitted) {
         return;
       }
       callEndEmitted = true;
       this.endCallInManager(callSid, callId, reason);
+    };
+    const triggerGreetingIfAttached = (trigger: string) => {
+      if (!attachment || greetingTriggered) {
+        return;
+      }
+      greetingTriggered = true;
+      if (greetingFallbackTimer) {
+        clearTimeout(greetingFallbackTimer);
+        greetingFallbackTimer = undefined;
+      }
+      bridge.triggerGreeting(initialGreetingInstructions, trigger);
+    };
+    const scheduleGreetingFallbackIfAttached = () => {
+      if (!attachment || ready || greetingTriggered || greetingFallbackTimer || !connected) {
+        return;
+      }
+      greetingFallbackTimer = setTimeout(() => {
+        triggerGreetingIfAttached("250ms fallback");
+      }, 250);
     };
 
     const bridge = createRealtimeVoiceBridgeSession({
@@ -637,10 +741,14 @@ export class RealtimeCallHandler {
       instructions: sessionInstructions ?? this.config.instructions,
       tools: this.config.tools,
       initialGreetingInstructions,
-      triggerGreetingOnReady: true,
+      triggerGreetingOnReady: false,
       audioSink: {
-        isOpen: () => ws.readyState === WebSocket.OPEN,
+        isOpen: () => attachment?.ws.readyState === WebSocket.OPEN,
         sendAudio: (muLaw) => {
+          if (!attachment) {
+            return;
+          }
+          const { ws, streamSid, diagnostics } = attachment;
           diagnostics.outboundMediaFrames += 1;
           diagnostics.outboundMediaBytes += muLaw.length;
           if (diagnostics.outboundMediaFrames === 1 && diagnostics.noOutboundMediaTimer) {
@@ -668,17 +776,23 @@ export class RealtimeCallHandler {
           );
         },
         clearAudio: () => {
-          diagnostics.clearEventsSent += 1;
+          if (!attachment) {
+            return;
+          }
+          attachment.diagnostics.clearEventsSent += 1;
           updateDiagnostics();
-          ws.send(JSON.stringify({ event: "clear", streamSid }));
+          attachment.ws.send(JSON.stringify({ event: "clear", streamSid: attachment.streamSid }));
         },
         sendMark: (markName) => {
-          diagnostics.marksSent += 1;
+          if (!attachment) {
+            return;
+          }
+          attachment.diagnostics.marksSent += 1;
           updateDiagnostics();
-          ws.send(
+          attachment.ws.send(
             JSON.stringify({
               event: "mark",
-              streamSid,
+              streamSid: attachment.streamSid,
               mark: { name: markName },
             }),
           );
@@ -689,8 +803,10 @@ export class RealtimeCallHandler {
           return;
         }
         if (role === "user") {
-          diagnostics.userFinalTranscripts += 1;
-          updateDiagnostics();
+          if (attachment) {
+            attachment.diagnostics.userFinalTranscripts += 1;
+            updateDiagnostics();
+          }
           const event: NormalizedEvent = {
             id: `realtime-speech-${callSid}-${Date.now()}`,
             type: "call.speech",
@@ -703,8 +819,10 @@ export class RealtimeCallHandler {
           this.manager.processEvent(event);
           return;
         }
-        diagnostics.assistantFinalTranscripts += 1;
-        updateDiagnostics();
+        if (attachment) {
+          attachment.diagnostics.assistantFinalTranscripts += 1;
+          updateDiagnostics();
+        }
         const requiredFirstUtterance = readMetadataString(
           callRecord,
           "foresightRequiredFirstUtterance",
@@ -752,13 +870,18 @@ export class RealtimeCallHandler {
         );
       },
       onReady: () => {
-        diagnostics.openaiReady = true;
-        updateDiagnostics();
+        ready = true;
+        if (attachment) {
+          attachment.diagnostics.openaiReady = true;
+          updateDiagnostics();
+        }
         logInfo("opening_turn.requested", {
           callId,
           providerCallId: callSid,
           reasonPresent: hasInitialGreeting,
+          twilioStreamAttached: Boolean(attachment),
         });
+        triggerGreetingIfAttached("session.updated");
       },
       onError: (error) => {
         logError("realtime_voice.error", {
@@ -771,8 +894,8 @@ export class RealtimeCallHandler {
           return;
         }
         emitCallEnd("error");
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.close(1011, "Bridge disconnected");
+        if (attachment?.ws.readyState === WebSocket.OPEN) {
+          attachment.ws.close(1011, "Bridge disconnected");
         }
         void this.provider
           .hangupCall({ callId, providerCallId: callSid, reason: "error" })
@@ -788,17 +911,39 @@ export class RealtimeCallHandler {
       },
     });
 
-    bridge.connect().catch((error: Error) => {
-      logError("realtime_voice.connect_failed", {
-        callSid,
-        message: error.message,
-      });
-      bridge.close();
-      emitCallEnd("error");
-      ws.close(1011, "Failed to connect");
-    });
+    const prepared: PreparedRealtimeVoiceBridge = {
+      session: bridge,
+      callId,
+      callRecord,
+      attachTwilioStream: (nextAttachment) => {
+        attachment = nextAttachment;
+        if (ready) {
+          attachment.diagnostics.openaiReady = true;
+          updateDiagnostics();
+          triggerGreetingIfAttached("session.updated");
+        } else {
+          updateDiagnostics();
+          scheduleGreetingFallbackIfAttached();
+        }
+      },
+      endCall: emitCallEnd,
+      close: () => {
+        if (greetingFallbackTimer) {
+          clearTimeout(greetingFallbackTimer);
+          greetingFallbackTimer = undefined;
+        }
+        bridge.close();
+      },
+    };
 
-    return bridge;
+    const originalConnect = bridge.connect.bind(bridge);
+    bridge.connect = async () => {
+      await originalConnect();
+      connected = true;
+      scheduleGreetingFallbackIfAttached();
+    };
+
+    return prepared;
   }
 
   private registerCallInManager(

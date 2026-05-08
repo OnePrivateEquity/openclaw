@@ -121,6 +121,20 @@ describe("RealtimeCallHandler path routing", () => {
     expect(payload.body).toMatch(
       /wss:\/\/gateway\.ts\.net\/voice\/stream\/realtime\/[0-9a-f-]{36}/,
     );
+    expect(payload.body).toContain(
+      '<Say voice="alice">One moment while I connect the voice session.</Say>',
+    );
+    expect(payload.body.indexOf("<Say")).toBeLessThan(payload.body.indexOf("<Connect>"));
+  });
+
+  it("adds a deterministic Twilio preamble before realtime stream connect", () => {
+    const handler = makeHandler();
+    const payload = handler.buildTwiMLPayload(makeRequest("/voice/webhook", "gateway.ts.net"));
+
+    expect(payload.body).toContain(
+      '<Say voice="alice">One moment while I connect the voice session.</Say>',
+    );
+    expect(payload.body).toMatch(/<Say[^>]*>.*<\/Say>\s*<Connect>/s);
   });
 
   it("preserves a public path prefix ahead of serve.path", () => {
@@ -343,6 +357,107 @@ describe("RealtimeCallHandler path routing", () => {
 });
 
 describe("RealtimeCallHandler websocket hardening", () => {
+  it("preconnects realtime session on TwiML CallSid but delays greeting until Twilio stream starts", async () => {
+    let callbacks: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0] | undefined;
+    const connect = vi.fn(async () => {
+      callbacks?.onReady?.();
+    });
+    const triggerGreeting = vi.fn();
+    const processEvent = vi.fn();
+    const callRecord: CallRecord = {
+      callId: "call-preconnect",
+      providerCallId: "CA-preconnect",
+      provider: "twilio",
+      direction: "outbound",
+      state: "initiated",
+      from: "+15550000000",
+      to: "+15550000001",
+      startedAt: Date.now(),
+      transcript: [],
+      processedEventIds: [],
+      metadata: {
+        initialMessage: "Hi Nathan, this is Soc testing realtime preconnect.",
+        mode: "conversation",
+      },
+    };
+    const createBridge = vi.fn(
+      (req: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0]) => {
+        callbacks = req;
+        return makeBridge({ connect, triggerGreeting });
+      },
+    );
+    const handler = makeHandler(undefined, {
+      manager: {
+        processEvent,
+        getCallByProviderCallId: vi.fn(() => callRecord),
+      },
+      realtimeProvider: makeRealtimeProvider(createBridge),
+    });
+
+    const payload = handler.buildTwiMLPayload(
+      makeRequest("/voice/webhook"),
+      new URLSearchParams({
+        CallSid: "CA-preconnect",
+        Direction: "outbound-dial",
+        From: "+15550000000",
+        To: "+15550000001",
+      }),
+    );
+    const match = payload.body.match(/wss:\/\/[^/]+(\/[^"]+)/);
+    if (!match) {
+      throw new Error("Failed to extract realtime stream path");
+    }
+
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(1));
+    expect(createBridge).toHaveBeenCalledTimes(1);
+    expect(triggerGreeting).not.toHaveBeenCalled();
+    expect(processEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "call.initiated" }));
+    expect(processEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "call.answered" }));
+    processEvent.mockClear();
+
+    const server = await startUpgradeWsServer({
+      urlPath: match[1],
+      onUpgrade: (request, socket, head) => {
+        handler.handleWebSocketUpgrade(request, socket, head);
+      },
+    });
+
+    try {
+      const ws = await connectWs(server.url);
+      try {
+        ws.send(
+          JSON.stringify({
+            event: "start",
+            start: {
+              streamSid: "MZ-preconnect",
+              callSid: "CA-preconnect",
+            },
+          }),
+        );
+
+        await vi.waitFor(() => expect(triggerGreeting).toHaveBeenCalledTimes(1));
+        expect(createBridge).toHaveBeenCalledTimes(1);
+        expect(processEvent).not.toHaveBeenCalledWith(
+          expect.objectContaining({ type: "call.initiated" }),
+        );
+        expect(processEvent).not.toHaveBeenCalledWith(
+          expect.objectContaining({ type: "call.answered" }),
+        );
+        expect(callRecord.metadata?.realtimeDiagnostics).toMatchObject({
+          streamSid: "MZ-preconnect",
+          callSid: "CA-preconnect",
+          openaiReady: true,
+        });
+      } finally {
+        if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+          ws.close();
+        }
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
   it("passes outbound initial messages as deterministic realtime opening instructions", async () => {
     const triggerGreeting = vi.fn();
     let onReady: (() => void) | undefined;
