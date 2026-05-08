@@ -1,6 +1,7 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { elevenLabsMediaUnderstandingProvider } from "./media-understanding-provider.js";
 import { buildElevenLabsRealtimeTranscriptionProvider } from "./realtime-transcription-provider.js";
+import { buildElevenLabsRealtimeVoiceProvider } from "./realtime-voice-provider.js";
 import { buildElevenLabsSpeechProvider } from "./speech-provider.js";
 
 export default definePluginEntry({
@@ -11,5 +12,6 @@ export default definePluginEntry({
     api.registerSpeechProvider(buildElevenLabsSpeechProvider());
     api.registerMediaUnderstandingProvider(elevenLabsMediaUnderstandingProvider);
     api.registerRealtimeTranscriptionProvider(buildElevenLabsRealtimeTranscriptionProvider());
+    api.registerRealtimeVoiceProvider(buildElevenLabsRealtimeVoiceProvider());
   },
 });
