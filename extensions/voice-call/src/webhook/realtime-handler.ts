@@ -25,7 +25,6 @@ const STREAM_TOKEN_TTL_MS = 30_000;
 const DEFAULT_HOST = "localhost:8443";
 const MAX_REALTIME_MESSAGE_BYTES = 256 * 1024;
 const VOICE_BRIDGE_LOG_PREFIX = "[voice-bridge]";
-const TWILIO_REALTIME_BOOT_PREAMBLE = "One moment while I connect the voice session.";
 const TWILIO_EXPECTED_MEDIA_FORMAT = {
   encoding: "audio/x-mulaw",
   sampleRate: 8000,
@@ -352,7 +351,6 @@ export class RealtimeCallHandler {
     const wsUrl = `wss://${host}${this.getStreamPathPattern()}/${token}`;
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="alice">${TWILIO_REALTIME_BOOT_PREAMBLE}</Say>
   <Connect>
     <Stream url="${wsUrl}" />
   </Connect>

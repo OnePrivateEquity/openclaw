@@ -121,20 +121,16 @@ describe("RealtimeCallHandler path routing", () => {
     expect(payload.body).toMatch(
       /wss:\/\/gateway\.ts\.net\/voice\/stream\/realtime\/[0-9a-f-]{36}/,
     );
-    expect(payload.body).toContain(
-      '<Say voice="alice">One moment while I connect the voice session.</Say>',
-    );
-    expect(payload.body.indexOf("<Say")).toBeLessThan(payload.body.indexOf("<Connect>"));
+    expect(payload.body).not.toContain("<Say");
+    expect(payload.body).toMatch(/<Response>\s*<Connect>/s);
   });
 
-  it("adds a deterministic Twilio preamble before realtime stream connect", () => {
+  it("does not add a Twilio hold preamble before realtime stream connect", () => {
     const handler = makeHandler();
     const payload = handler.buildTwiMLPayload(makeRequest("/voice/webhook", "gateway.ts.net"));
 
-    expect(payload.body).toContain(
-      '<Say voice="alice">One moment while I connect the voice session.</Say>',
-    );
-    expect(payload.body).toMatch(/<Say[^>]*>.*<\/Say>\s*<Connect>/s);
+    expect(payload.body).not.toContain("<Say");
+    expect(payload.body).toMatch(/<Response>\s*<Connect>/s);
   });
 
   it("preserves a public path prefix ahead of serve.path", () => {
