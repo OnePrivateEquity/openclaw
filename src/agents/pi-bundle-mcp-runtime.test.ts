@@ -21,6 +21,47 @@ afterEach(async () => {
 });
 
 describe("session MCP runtime", () => {
+  it("closes transports when MCP startup times out", async () => {
+    let closed = 0;
+    const neverConnectingClient = {
+      connect: () => new Promise<void>(() => undefined),
+    };
+    const transport = {
+      close: async () => {
+        closed += 1;
+      },
+    };
+
+    await expect(
+      __testing.connectWithTimeout(neverConnectingClient as any, transport as any, 5),
+    ).rejects.toThrow("MCP server connection timed out after 5ms");
+    expect(closed).toBe(1);
+  });
+
+  it("serializes duplicate MCP server startups by startup key", async () => {
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const firstDone = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = __testing.serializeMcpServerStartup("same-server", async () => {
+      events.push("first-start");
+      await firstDone;
+      events.push("first-end");
+    });
+    const second = __testing.serializeMcpServerStartup("same-server", async () => {
+      events.push("second-start");
+    });
+
+    await Promise.resolve();
+    expect(events).toEqual(["first-start"]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(events).toEqual(["first-start", "first-end", "second-start"]);
+    expect(__testing.getMcpServerStartupInFlightCount()).toBe(0);
+  });
+
   it("keeps colliding sanitized tool definitions stable across catalog order changes", async () => {
     function makeRuntime(
       tools: Array<{ toolName: string; description: string }>,

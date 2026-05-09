@@ -33,27 +33,58 @@ type ListedTool = Awaited<ReturnType<Client["listTools"]>>["tools"][number];
 
 const SESSION_MCP_RUNTIME_MANAGER_KEY = Symbol.for("openclaw.sessionMcpRuntimeManager");
 
+const MCP_SERVER_STARTUP_IN_FLIGHT = new Map<string, Promise<void>>();
+
+async function serializeMcpServerStartup(key: string, start: () => Promise<void>): Promise<void> {
+  const previous = MCP_SERVER_STARTUP_IN_FLIGHT.get(key);
+  if (previous) {
+    await previous.catch(() => undefined);
+  }
+
+  const current = start();
+  const tracked = current
+    .catch(() => undefined)
+    .finally(() => {
+      if (MCP_SERVER_STARTUP_IN_FLIGHT.get(key) === tracked) {
+        MCP_SERVER_STARTUP_IN_FLIGHT.delete(key);
+      }
+    });
+  MCP_SERVER_STARTUP_IN_FLIGHT.set(key, tracked);
+  return await current;
+}
+
 function connectWithTimeout(
   client: Client,
   transport: Transport,
   timeoutMs: number,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`MCP server connection timed out after ${timeoutMs}ms`)),
-      timeoutMs,
-    );
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      void transport.close().catch(() => undefined);
+      settle(() => reject(new Error(`MCP server connection timed out after ${timeoutMs}ms`)));
+    }, timeoutMs);
     client.connect(transport).then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
+      () => settle(resolve),
+      (error) => settle(() => reject(error)),
     );
   });
+}
+
+function mcpStartupKey(params: {
+  serverName: string;
+  transportType: BundleMcpSession["transportType"];
+  description: string;
+}): string {
+  return `${params.serverName}\u0000${params.transportType}\u0000${params.description}`;
 }
 
 function redactErrorUrls(error: unknown): string {
@@ -188,7 +219,14 @@ export function createSessionMcpRuntime(params: {
 
           try {
             failIfDisposed();
-            await connectWithTimeout(client, resolved.transport, resolved.connectionTimeoutMs);
+            await serializeMcpServerStartup(
+              mcpStartupKey({
+                serverName,
+                transportType: resolved.transportType,
+                description: resolved.description,
+              }),
+              () => connectWithTimeout(client, resolved.transport, resolved.connectionTimeoutMs),
+            );
             failIfDisposed();
             const listedTools = await listAllTools(client);
             failIfDisposed();
@@ -434,6 +472,12 @@ export async function disposeAllSessionMcpRuntimes(): Promise<void> {
 }
 
 export const __testing = {
+  connectWithTimeout,
+  serializeMcpServerStartup,
+  getMcpServerStartupInFlightCount() {
+    return MCP_SERVER_STARTUP_IN_FLIGHT.size;
+  },
+  createSessionMcpRuntimeManager,
   async resetSessionMcpRuntimeManager() {
     await disposeAllSessionMcpRuntimes();
   },
